@@ -265,6 +265,7 @@ JSON.stringify({{ docName: doc.name(), colCount: colCount, headers: headers, for
             col_map[h] = i + 1  # 1-based
 
     formula_row = [_resolve_named_refs(f, col_map) for f in formula_row]
+    _validate_formula_refs(formula_row, col_map)
 
     return template_doc_name, col_map, headers, formula_row, num_cols, col_widths
 
@@ -359,32 +360,27 @@ end tell'''
 
 
 def _write_tax_rows_as(doc: str, sheet: str, table: str, tax_row: int):
-    values_script = f'''tell application "Numbers"
+    # Numbers Creator Studio doesn't reliably expose a 'percentage' enum constant for
+    # `set format of cell`, and column-level format can override cell-level JXA format.
+    # Write the rates as pre-formatted percentage strings — display is always correct.
+    fed   = 0.1644
+    state = 0.0917
+    total = fed + state
+    script = f'''tell application "Numbers"
   tell document {_as_str(doc)}
     tell sheet {_as_str(sheet)}
       tell table {_as_str(table)}
         set value of cell 1 of row {tax_row} to "Federal Rate"
-        set value of cell 2 of row {tax_row} to 0.1644
+        set value of cell 2 of row {tax_row} to {_as_str(f"{fed:.2%}")}
         set value of cell 4 of row {tax_row} to "State Rate"
-        set value of cell 5 of row {tax_row} to 0.0917
+        set value of cell 5 of row {tax_row} to {_as_str(f"{state:.2%}")}
         set value of cell 7 of row {tax_row} to "Total Tax Rate"
-        set value of cell 8 of row {tax_row} to "=B{tax_row}+E{tax_row}"
+        set value of cell 8 of row {tax_row} to {_as_str(f"{total:.2%}")}
       end tell
     end tell
   end tell
 end tell'''
-    run_applescript_file(values_script)
-
-    jxa = f'''
-var app = Application("Numbers");
-var tbl = app.documents[{json.dumps(doc)}].sheets[{json.dumps(sheet)}].tables[{json.dumps(table)}];
-var r = {tax_row - 1};
-try {{ tbl.rows[r].cells[1].format = "percentage"; }} catch(e) {{}}
-try {{ tbl.rows[r].cells[4].format = "percentage"; }} catch(e) {{}}
-try {{ tbl.rows[r].cells[7].format = "percentage"; }} catch(e) {{}}
-"ok"
-'''
-    run_jxa_file(jxa)
+    run_applescript_file(script)
 
 
 # ── Output Document Setup ──────────────────────────────────────────────────────
@@ -469,6 +465,13 @@ try {{ tbl.rowCount = {num_rows}; }} catch(e) {{}}
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+def fmt_money(v):
+    return round(v, 2) if v is not None else v
+
+def fmt_qty(v):
+    return round(v, 4) if v is not None else v
+
+
 def parse_float(s):
     if not s or str(s).strip() in ("--", "-", "N/A", ""):
         return None
@@ -531,7 +534,11 @@ def col_letter(n):
 
 
 def _resolve_named_refs(formula: str, col_map: dict) -> str:
-    """Convert Numbers internal named column refs like 'Shares 16' → 'G2'."""
+    """Convert Numbers internal named column refs like 'Shares 16' or 'Shares QQQM' → 'G2'.
+
+    Numbers stores formulas using header-name refs where the suffix is either an internal
+    table ID (digits) or the row's symbol/value (e.g. QQQM). Use \\w+ to match both.
+    """
     if not formula or not formula.startswith("="):
         return formula
     header_to_letter = {h: col_letter(i) for h, i in col_map.items() if h and h.strip()}
@@ -539,9 +546,31 @@ def _resolve_named_refs(formula: str, col_map: dict) -> str:
     result = formula
     for header in headers_sorted:
         letter = header_to_letter[header]
-        result = re.sub(re.escape(header) + r"\s+\d+", letter + "2", result)
+        result = re.sub(re.escape(header) + r"\s+\w+", letter + "2", result)
     result = result.replace("×", "*").replace("−", "-").replace("÷", "/")
     return result
+
+
+def _validate_formula_refs(formula_row: list, col_map: dict):
+    """Raise if any formula still contains named references after resolution.
+
+    Named refs look like 'Shares QQQM' (header + symbol). If they persist after
+    _resolve_named_refs, row 2 of the template has live data that caused Numbers to
+    convert column-letter refs into named refs during formula evaluation.
+    """
+    for f in formula_row:
+        if not f or not f.startswith("="):
+            continue
+        for header in col_map:
+            if header and re.search(re.escape(header) + r"\s+\w", f):
+                sys.exit(
+                    f"ERROR: Template formula patterns still contain named references "
+                    f"(e.g. \"{header} ...\"). Row 2 of each _templateN sheet in the "
+                    "template must be cleared of all data values before running. "
+                    "Open Portfolio Template.numbers, select row 2 of the My Portfolio "
+                    "table in each _templateN sheet, delete the values (not the formulas), "
+                    "and save."
+                )
 
 
 def derive_doc_name(csv_path):
@@ -615,18 +644,33 @@ def parse_csv(path):
 
         effective_symbol = symbol if symbol else re.sub(r"\s+", "_", description[:20]).upper()
 
+        quantity     = fmt_qty(parse_float(row.get("Quantity")) or 0.0)
+        last_price   = fmt_money(parse_float(row.get("Last Price")) or 0.0)
+        last_chg     = fmt_money(parse_float(row.get("Last Price Change")) or 0.0)
+        cur_value    = fmt_money(parse_float(row.get("Current Value")) or 0.0)
+        cost_basis   = fmt_money(parse_float(row.get("Cost Basis Total")))
+        avg_cb       = fmt_money(parse_float(row.get("Average Cost Basis")))
+
+        # Bug 5/9: skip money-market rows with no real value
+        if mm and cur_value == 0.0 and not cost_basis:
+            continue
+
+        # Bug 3: T-Bill avg_cost_basis = cost per $100 face value
+        if (tbill or cd) and cost_basis is not None and quantity:
+            avg_cb = fmt_money(cost_basis / (quantity / 100))
+
         positions.append({
             "account_name": account_name,
             "bucket": bucket,
             "symbol": effective_symbol,
             "display_symbol": symbol,
             "description": description,
-            "quantity": parse_float(row.get("Quantity")) or 0.0,
-            "last_price": parse_float(row.get("Last Price")) or 0.0,
-            "last_price_change": parse_float(row.get("Last Price Change")) or 0.0,
-            "current_value": parse_float(row.get("Current Value")) or 0.0,
-            "cost_basis_total": parse_float(row.get("Cost Basis Total")),
-            "avg_cost_basis": parse_float(row.get("Average Cost Basis")),
+            "quantity": quantity,
+            "last_price": last_price,
+            "last_price_change": last_chg,
+            "current_value": cur_value,
+            "cost_basis_total": cost_basis,
+            "avg_cost_basis": avg_cb,
             "is_tbill": tbill,
             "is_cd": cd,
             "is_money_market": mm,
@@ -694,32 +738,47 @@ def build_data_row(pos, formula_row, col_map, r, is_ira=False):
     set_col("idx", r - 1)
     set_col("Symbol", pos["display_symbol"] or pos["symbol"])
     set_col("Name", pos["description"])
-    set_col("Shares", pos["quantity"] if pos["quantity"] else "")
+    set_col("Shares", fmt_qty(pos["quantity"]) if pos["quantity"] else "")
     set_col("Price Paid in US Dollars", 1.0)
 
     avg_cb = pos["avg_cost_basis"]
-    set_col("Price Paid", avg_cb if avg_cb is not None else "")
+    set_col("Price Paid", fmt_money(avg_cb) if avg_cb is not None else "")
 
     if pos["is_tbill"] or pos["is_cd"]:
+        # Bug 2/3: T-Bills quoted per $100 face value
         set_col("Price", pos["last_price"])
         set_col("Price Change", pos["last_price_change"])
 
         d = get_letter("Price", 4)
         e = get_letter("Price Change", 5)
-        set_col("% Change", f'=IFERROR({e}{r}/{d}{r},"–")')
-
         g = get_letter("Shares", 7)
+        i = get_letter("Price Paid", 9)
+
+        set_col("% Change", f'=IFERROR({e}{r}/{d}{r},"–")')
         set_col("Market Value", f'=IFERROR({d}{r}*({g}{r}/100),"–")')
+
+        # Cost Basis: static if available (avoids rounding from formula), else formula
+        cb = pos.get("cost_basis_total")
+        if cb is not None:
+            set_col("Cost Basis", fmt_money(cb))
+        else:
+            set_col("Cost Basis", f'=IFERROR({i}{r}*({g}{r}/100),"–")')
 
         for col_name in ("Ann Div / sh", "Ann Div", "Div %", "Cost Div %",
                          "Ex-Div Date", "Div Pay Date", "Next Div Ttl", "Divs/year"):
             set_col(col_name, "")
 
     if pos["is_money_market"]:
+        # Bug 4: write static price and market value — don't let STOCK() formula run,
+        # which would pick up a percentage format from the template cell
         set_col("Price", 1.0)
         set_col("Price Change", 0.0)
         set_col("% Change", 0.0)
-        for col_name in ("Gain", "% Gain", "Gain %"):
+        # Write market value directly from CSV so blank-Shares rows still show a value
+        mv = pos.get("current_value")
+        if mv:
+            set_col("Market Value", fmt_money(mv))
+        for col_name in ("Gain", "% Gain", "Gain %", "Cost Basis"):
             set_col(col_name, "")
 
     return row
@@ -727,7 +786,7 @@ def build_data_row(pos, formula_row, col_map, r, is_ira=False):
 
 # ── Totals Builder ─────────────────────────────────────────────────────────────
 
-def _build_fallback_totals(col_map, num_cols, last_data, tot_row):
+def _build_fallback_totals(col_map, num_cols, last_data, tot_row, month_headers=None):
     row = [""] * num_cols
 
     def sf(header, formula):
@@ -741,12 +800,104 @@ def _build_fallback_totals(col_map, num_cols, last_data, tot_row):
     g = L("Shares", 7);        sf("Shares",      f"=SUM({g}2:{g}{last_data})")
     j = L("Cost Basis", 10);   sf("Cost Basis",   f"=SUM({j}2:{j}{last_data})")
     k = L("Market Value", 11); sf("Market Value", f"=SUM({k}2:{k}{last_data})")
-    sf("Gain",   f'=IFERROR({k}{tot_row}-{j}{tot_row},"–")')
-    sf("% Gain", f'=IFERROR(({k}{tot_row}-{j}{tot_row})/{j}{tot_row},"–")')
+    sf("Gain",        f'=IFERROR({k}{tot_row}-{j}{tot_row},"–")')
+    sf("% Gain",      f'=IFERROR(({k}{tot_row}-{j}{tot_row})/{j}{tot_row},"–")')
     q = L("Ann Div", 17);      sf("Ann Div",      f"=SUM({q}2:{q}{last_data})")
+    sf("Div %",       f'=IFERROR({q}{tot_row}/{k}{tot_row},"-")')
+    sf("Cost Div %",  f'=IFERROR({q}{tot_row}/{j}{tot_row},"-")')
     w = L("Next Div Ttl", 23); sf("Next Div Ttl", f"=SUM({w}2:{w}{last_data})")
 
+    # Monthly dividend columns
+    for mh in (month_headers or []):
+        mh_col = col_map.get(mh)
+        if mh_col:
+            ml = col_letter(mh_col)
+            sf(mh, f"=SUM({ml}2:{ml}{last_data})")
+
     return row
+
+
+# ── Spot-check ────────────────────────────────────────────────────────────────
+
+def spot_check_sheet(doc: str, sheet: str, positions: list, col_map: dict, tot_row: int):
+    """Read back key cell values from Numbers and print them for visual confirmation."""
+    TABLE = "My Portfolio"
+    k_idx = col_map.get("Market Value", 11) - 1   # 0-based
+    j_idx = col_map.get("Cost Basis", 10) - 1
+    b_idx = col_map.get("Symbol", 2) - 1
+    g_idx = col_map.get("Shares", 7) - 1
+
+    # Find T-Bill rows for the /100 sanity check
+    tbill_rows = [i + 2 for i, p in enumerate(positions) if p.get("is_tbill") or p.get("is_cd")]
+
+    jxa = f'''
+var app = Application("Numbers");
+var doc = app.documents[{json.dumps(doc)}];
+var tbl = doc.sheets[{json.dumps(sheet)}].tables[{json.dumps(TABLE)}];
+var kIdx = {k_idx}, jIdx = {j_idx}, bIdx = {b_idx}, gIdx = {g_idx};
+var totRow = {tot_row - 1};  // 0-based
+var result = {{}};
+
+// Row 2 (first data row, 0-based = 1)
+try {{ result.row2_sym = String(tbl.rows[1].cells[bIdx].value()); }} catch(e) {{ result.row2_sym = "ERR"; }}
+try {{ result.row2_sh  = tbl.rows[1].cells[gIdx].value(); }} catch(e) {{ result.row2_sh = null; }}
+try {{ result.row2_mv  = tbl.rows[1].cells[kIdx].value(); }} catch(e) {{ result.row2_mv = null; }}
+try {{ result.row2_cb  = tbl.rows[1].cells[jIdx].value(); }} catch(e) {{ result.row2_cb = null; }}
+
+// Totals row
+try {{ result.tot_mv   = tbl.rows[totRow].cells[kIdx].value(); }} catch(e) {{ result.tot_mv = null; }}
+try {{ result.tot_cb   = tbl.rows[totRow].cells[jIdx].value(); }} catch(e) {{ result.tot_cb = null; }}
+
+// T-Bill rows — check for implausibly large Market Values
+var tbillRows = {json.dumps(tbill_rows)};
+result.tbill_mv = {{}};
+for (var i = 0; i < tbillRows.length; i++) {{
+  var r0 = tbillRows[i] - 1;
+  try {{
+    var sym = String(tbl.rows[r0].cells[bIdx].value());
+    var mv  = tbl.rows[r0].cells[kIdx].value();
+    result.tbill_mv[sym] = mv;
+  }} catch(e) {{}}
+}}
+
+JSON.stringify(result);
+'''
+    try:
+        raw = run_jxa_file(jxa)
+        sc = json.loads(raw)
+    except Exception as e:
+        print(f"    [spot-check failed: {e}]")
+        return
+
+    mv2 = sc.get("row2_mv")
+    cb2 = sc.get("row2_cb")
+    sh2 = sc.get("row2_sh")
+    sym2 = sc.get("row2_sym", "?")
+    tot_mv = sc.get("tot_mv")
+    tot_cb = sc.get("tot_cb")
+
+    def fmt(v):
+        try:
+            return f"${float(v):,.0f}"
+        except Exception:
+            return str(v)
+
+    print(f"    Spot-check row 2: {sym2}  Shares={sh2}  MV={fmt(mv2)}  Cost={fmt(cb2)}")
+    if tot_mv is not None and tot_cb is not None:
+        try:
+            gain = float(tot_mv) - float(tot_cb)
+            print(f"    Spot-check totals: MV={fmt(tot_mv)}  Cost={fmt(tot_cb)}  Gain={fmt(gain)}")
+        except Exception:
+            pass
+
+    for sym, mv in sc.get("tbill_mv", {}).items():
+        try:
+            if float(mv) > 10_000_000:
+                print(f"    WARNING: T-Bill '{sym}' market value {fmt(mv)} looks wrong — check /100 formula")
+            else:
+                print(f"    Spot-check T-Bill {sym}: MV={fmt(mv)}")
+        except Exception:
+            pass
 
 
 # ── Sheet Builder ──────────────────────────────────────────────────────────────
@@ -814,7 +965,7 @@ def build_sheet(doc: str, sheet_name: str, positions: list,
     _write_rows_as_batch(doc, template_sheet, TABLE, 2, data_rows)
 
     # ── Totals row ──
-    totals = _build_fallback_totals(col_map, num_cols, last_data, tot_row)
+    totals = _build_fallback_totals(col_map, num_cols, last_data, tot_row, month_headers)
     label = "Portfolio-IRA" if is_ira else "Portfolio"
     a_idx = col_map.get("idx", 1)
     if a_idx:
@@ -829,6 +980,9 @@ def build_sheet(doc: str, sheet_name: str, positions: list,
 
     rename_sheet_as(doc, template_sheet, sheet_name)
     print(f"  ✓ Sheet '{sheet_name}' complete.")
+
+    spot_check_sheet(doc, sheet_name, positions, col_map, tot_row)
+
     return tot_row
 
 
