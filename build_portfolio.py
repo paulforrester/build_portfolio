@@ -35,6 +35,15 @@ ACCOUNT_BUCKETS = [
 # Regex matching any _templateN-style sheet name (handles typos like _templat6)
 TEMPLATE_SHEET_RE = re.compile(r"^_templa\w*(\d+)$")
 
+# Dynamic Numbers formulas for the four monthly dividend header cells.
+# MOD(...,12) handles year rollover; IFERROR catches MONTHNAME(0) for December.
+MONTH_HEADER_FORMULAS = [
+    '=IFERROR(MONTHNAME(MOD(MONTH(NOW()),12)),MONTHNAME(12)) & " " & YEAR(NOW())',
+    '=IFERROR(MONTHNAME(MOD(MONTH(NOW())+1,12)),MONTHNAME(12)) & " " & YEAR(NOW())',
+    '=IFERROR(MONTHNAME(MOD(MONTH(NOW())+2,12)),MONTHNAME(12)) & " " & YEAR(NOW())',
+    '=IFERROR(MONTHNAME(MOD(MONTH(NOW())+3,12)),MONTHNAME(12)) & " " & YEAR(NOW())',
+]
+
 
 # ── AppleScript / JXA Runners ──────────────────────────────────────────────────
 
@@ -944,7 +953,9 @@ def build_sheet(doc: str, sheet_name: str, positions: list,
         for i, mh in enumerate(month_headers):
             ci = month_col_start - 1 + i
             old_key = header_row[ci] if ci < len(header_row) else None
-            header_row[ci] = mh
+            # Write a dynamic formula so the header self-updates each month;
+            # col_map still tracks this position under the static mh key for totals.
+            header_row[ci] = MONTH_HEADER_FORMULAS[i] if i < len(MONTH_HEADER_FORMULAS) else mh
             if old_key and old_key in col_map:
                 col_map[mh] = col_map.pop(old_key)
     _write_single_row_as(doc, template_sheet, TABLE, 1, header_row)
