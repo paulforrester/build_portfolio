@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+
+# Fidelity CSV exports — contain personal financial data
+*.csv
+
+# Generated output documents (not the template)
+Portfolio *.numbers
+!Portfolio Template.numbers
+
+# Claude Code session data
+.claude/
