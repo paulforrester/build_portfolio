@@ -15,6 +15,7 @@ import time
 from calendar import month_name as MONTH_NAMES
 from datetime import datetime
 
+DESKTOP_DIR = os.path.expanduser("~/Desktop")
 NUMBERS_DIR = os.path.expanduser(
     "~/Library/Mobile Documents/com~apple~Numbers/Documents"
 )
@@ -30,6 +31,9 @@ ACCOUNT_BUCKETS = [
     ("401K",      ["401k", "401 k"]),
     ("CMA",       ["cma", "cash management"]),
 ]
+
+# Regex matching any _templateN-style sheet name (handles typos like _templat6)
+TEMPLATE_SHEET_RE = re.compile(r"^_templa\w*(\d+)$")
 
 
 # ── AppleScript / JXA Runners ──────────────────────────────────────────────────
@@ -81,14 +85,12 @@ def run_jxa_file(script: str) -> str:
 # ── AppleScript value encoding ─────────────────────────────────────────────────
 
 def _as_str(v: object) -> str:
-    """Encode a Python value as a quoted AppleScript string literal."""
     s = str(v) if v is not None else ""
     s = s.replace("\\", "\\\\").replace('"', '\\"').replace("\r", " ").replace("\n", " ")
     return f'"{s}"'
 
 
 def _as_val(v: object) -> str:
-    """Encode a Python value as an AppleScript value literal (number or string)."""
     if v is None or v == "":
         return '""'
     if isinstance(v, bool):
@@ -97,13 +99,8 @@ def _as_val(v: object) -> str:
         return str(float(v))
     s = str(v)
     if s.startswith("="):
-        return '""'  # formula placeholder — written separately
+        return '""'  # formula placeholder — written in formula pass
     return _as_str(s)
-
-
-def _as_row(row: list) -> str:
-    """Encode a list as an AppleScript list literal."""
-    return "{" + ", ".join(_as_val(v) for v in row) + "}"
 
 
 # ── Numbers document management ────────────────────────────────────────────────
@@ -133,13 +130,6 @@ end tell'''
         run_applescript(script)
     except RuntimeError:
         pass
-
-
-def create_document_as(name: str):
-    script = f'''tell application "Numbers"
-  make new document with properties {{name: {_as_str(name)}}}
-end tell'''
-    run_applescript(script)
 
 
 def list_sheets_as(doc: str) -> list:
@@ -173,10 +163,18 @@ end tell'''
         pass
 
 
+def rename_sheet_as(doc: str, old_name: str, new_name: str):
+    script = f'''tell application "Numbers"
+  tell document {_as_str(doc)}
+    set name of sheet {_as_str(old_name)} to {_as_str(new_name)}
+  end tell
+end tell'''
+    run_applescript_file(script)
+
+
 # ── Template Reading (JXA) ─────────────────────────────────────────────────────
 
 def _resolve_template_path(template_doc: str) -> str:
-    """Resolve a template doc argument to an absolute .numbers file path."""
     if os.path.isabs(template_doc):
         return template_doc
     if os.path.exists(template_doc):
@@ -185,7 +183,6 @@ def _resolve_template_path(template_doc: str) -> str:
 
 
 def _ensure_template_open(template_doc: str):
-    """Open the template file in Numbers (idempotent — brings existing window to front)."""
     abs_path = _resolve_template_path(template_doc)
     if not os.path.exists(abs_path):
         sys.exit(f"ERROR: Template file not found at '{abs_path}'")
@@ -196,8 +193,7 @@ def _ensure_template_open(template_doc: str):
 def read_template(template_doc: str):
     """Return (template_doc_name, col_map, headers, formula_row, num_cols, col_widths).
 
-    Reads headers (row 1), formula patterns (row 2), and column widths from the
-    _template sheet in the template document.
+    Reads from _template1 sheet in the template document.
     """
     _ensure_template_open(template_doc)
 
@@ -208,19 +204,20 @@ var docs = app.documents();
 outer: for (var i = 0; i < docs.length; i++) {{
   var sheets = docs[i].sheets();
   for (var j = 0; j < sheets.length; j++) {{
-    if (sheets[j].name() === "_template") {{
+    var sname = sheets[j].name();
+    if (sname === "_template1" || sname === "_template") {{
       doc = docs[i]; sheet = sheets[j]; break outer;
     }}
   }}
 }}
-if (!doc) throw new Error("No open Numbers document has a _template sheet. Open: " + {json.dumps(template_doc)});
+if (!doc) throw new Error("No open Numbers document has a _template1 (or _template) sheet.");
 
 var tables = sheet.tables();
 var table = null;
 for (var i = 0; i < tables.length; i++) {{
   if (tables[i].name() === "My Portfolio") {{ table = tables[i]; break; }}
 }}
-if (!table) throw new Error("Table My Portfolio not found in _template");
+if (!table) throw new Error("Table My Portfolio not found in template sheet");
 
 var colCount = table.columnCount();
 var headers = [], formulas = [], widths = [];
@@ -272,19 +269,78 @@ JSON.stringify({{ docName: doc.name(), colCount: colCount, headers: headers, for
     return template_doc_name, col_map, headers, formula_row, num_cols, col_widths
 
 
-# ── Bulk Write Helpers ─────────────────────────────────────────────────────────
+# ── Batch Write Helpers ────────────────────────────────────────────────────────
+
+def _write_rows_as_batch(doc: str, sheet: str, table: str, start_row: int, rows: list):
+    """Write rows in 2 osascript calls: one for all static values, one for all formulas.
+
+    Uses `set value of cells of row N to {list}` (per-row, not range) because
+    Numbers does not accept mixed-type 2D lists with `set value of range`.
+    All rows are batched into a single AppleScript script for each pass.
+    """
+    if not rows:
+        return
+
+    # Pass 1: all static values — one `set value of cell` per non-empty, non-formula cell,
+    # all batched into a single AppleScript script. Numbers rejects mixed-type list literals
+    # so we cannot use `set value of cells of row N to {list}` or `set value of range`.
+    cell_stmts = []
+    for ri, row in enumerate(rows):
+        r = start_row + ri
+        for ci, cell in enumerate(row):
+            if isinstance(cell, str) and cell.startswith("="):
+                continue
+            if cell == "" or cell is None:
+                continue
+            cell_stmts.append(f"set value of cell {ci + 1} of row {r} to {_as_val(cell)}")
+
+    body1 = "\n        ".join(cell_stmts)
+    script1 = f'''tell application "Numbers"
+  tell document {_as_str(doc)}
+    tell sheet {_as_str(sheet)}
+      tell table {_as_str(table)}
+        {body1}
+      end tell
+    end tell
+  end tell
+end tell'''
+    run_applescript_file(script1)
+
+    # Pass 2: all formula cells in one script.
+    # Use `set value of cell C of row R to "=formula"` — Numbers parses strings
+    # that start with "=" as formulas. _as_str handles " → \" which AppleScript
+    # unescapes correctly when reading from a file.
+    formula_stmts = []
+    for ri, row in enumerate(rows):
+        r = start_row + ri
+        for ci, cell in enumerate(row):
+            if isinstance(cell, str) and cell.startswith("="):
+                formula_stmts.append(
+                    f"set value of cell {ci + 1} of row {r} to {_as_str(cell)}"
+                )
+
+    if formula_stmts:
+        body2 = "\n        ".join(formula_stmts)
+        script2 = f'''tell application "Numbers"
+  tell document {_as_str(doc)}
+    tell sheet {_as_str(sheet)}
+      tell table {_as_str(table)}
+        {body2}
+      end tell
+    end tell
+  end tell
+end tell'''
+        run_applescript_file(script2)
+
 
 def _write_single_row_as(doc: str, sheet: str, table: str, actual_row: int, row: list):
-    """Write one row: static values + formulas in a single osascript call."""
+    """Write one row via a single osascript call (used for header and totals)."""
     stmts = []
     for ci, cell in enumerate(row):
         c = ci + 1
         if isinstance(cell, str) and cell.startswith("="):
-            # Pass the full formula string (with "=") as the cell value.
-            # Numbers parses strings beginning with "=" as formula expressions.
-            f_esc = (cell.replace("\\", "\\\\").replace('"', '\\"')
-                        .replace("\n", " ").replace("\r", " "))
-            stmts.append(f'set value of cell {c} of row {actual_row} to "{f_esc}"')
+            # `set value to "=formula"` — Numbers parses "=..." strings as formulas
+            stmts.append(f"set value of cell {c} of row {actual_row} to {_as_str(cell)}")
         elif cell != "" and cell is not None:
             stmts.append(f"set value of cell {c} of row {actual_row} to {_as_val(cell)}")
     if not stmts:
@@ -302,15 +358,7 @@ end tell'''
     run_applescript_file(script)
 
 
-def _write_rows_as(doc: str, sheet: str, table: str, start_row: int, rows: list):
-    """Write rows one at a time to avoid Apple Event connection drops on large batches."""
-    for ri, row in enumerate(rows):
-        _write_single_row_as(doc, sheet, table, start_row + ri, row)
-
-
 def _write_tax_rows_as(doc: str, sheet: str, table: str, tax_row: int):
-    # Values + formula via AppleScript; number format via JXA (avoids compile-time
-    # "bold/format not in dictionary" errors for this Numbers build).
     values_script = f'''tell application "Numbers"
   tell document {_as_str(doc)}
     tell sheet {_as_str(sheet)}
@@ -327,11 +375,10 @@ def _write_tax_rows_as(doc: str, sheet: str, table: str, tax_row: int):
 end tell'''
     run_applescript_file(values_script)
 
-    # Format the rate cells as percentage via JXA
     jxa = f'''
 var app = Application("Numbers");
 var tbl = app.documents[{json.dumps(doc)}].sheets[{json.dumps(sheet)}].tables[{json.dumps(table)}];
-var r = {tax_row - 1};  // 0-based
+var r = {tax_row - 1};
 try {{ tbl.rows[r].cells[1].format = "percentage"; }} catch(e) {{}}
 try {{ tbl.rows[r].cells[4].format = "percentage"; }} catch(e) {{}}
 try {{ tbl.rows[r].cells[7].format = "percentage"; }} catch(e) {{}}
@@ -340,62 +387,29 @@ try {{ tbl.rows[r].cells[7].format = "percentage"; }} catch(e) {{}}
     run_jxa_file(jxa)
 
 
-# ── Template-duplication Sheet Helpers ────────────────────────────────────────
+# ── Output Document Setup ──────────────────────────────────────────────────────
 
-def add_sheet_and_table_as(doc: str, sheet_name: str, table_name: str,
-                            num_rows: int, num_cols: int):
-    """Create a new sheet containing a single table with the given dimensions."""
-    script = f'''tell application "Numbers"
-  tell document {_as_str(doc)}
-    make new sheet with properties {{name: {_as_str(sheet_name)}}}
-    tell sheet {_as_str(sheet_name)}
-      set existing_tables to every table
-      make new table with properties {{name: {_as_str(table_name)}, row count: {num_rows}, column count: {num_cols}}}
-      repeat with t in existing_tables
-        try
-          delete t
-        end try
-      end repeat
-    end tell
-  end tell
-end tell'''
-    run_applescript_file(script)
+def setup_output_document(template_path: str, doc_name: str, output_dir: str) -> str:
+    """Copy the template to output_dir, open it, and return the settled document name."""
+    os.makedirs(output_dir, exist_ok=True)
+    dest = os.path.join(output_dir, f"{doc_name}.numbers")
 
-
-def rename_sheet_as(doc: str, old_name: str, new_name: str):
-    """Rename a sheet within a document."""
-    script = f'''tell application "Numbers"
-  tell document {_as_str(doc)}
-    set name of sheet {_as_str(old_name)} to {_as_str(new_name)}
-  end tell
-end tell'''
-    run_applescript_file(script)
-
-
-def setup_output_document(template_path: str, doc_name: str) -> str:
-    """Create the output document by copying the template file.
-
-    Returns the actual document name as Numbers sees it (may differ from doc_name
-    if Numbers appended a numeric suffix).
-    """
-    dest = os.path.join(NUMBERS_DIR, f"{doc_name}.numbers")
-
-    # Delete any existing file with the target name so Numbers doesn't suffix it
-    pattern = os.path.join(NUMBERS_DIR, glob.escape(doc_name) + "*.numbers")
-    for old_file in glob.glob(pattern):
-        try:
-            os.remove(old_file)
-            print(f"  Removed '{os.path.basename(old_file)}'")
-        except OSError as e:
-            print(f"  WARNING: Could not remove '{old_file}': {e}")
+    if os.path.exists(dest):
+        suffix = 2
+        while os.path.exists(os.path.join(output_dir, f"{doc_name} ({suffix}).numbers")):
+            suffix += 1
+        dest = os.path.join(output_dir, f"{doc_name} ({suffix}).numbers")
+        effective_name = f"{doc_name} ({suffix})"
+        print(f"  WARNING: '{doc_name}.numbers' already exists; using '{os.path.basename(dest)}'")
+    else:
+        effective_name = doc_name
 
     shutil.copy2(template_path, dest)
 
     before_set = set(list_documents_as())
     subprocess.run(["open", "-a", "Numbers", dest])
 
-    # Poll until the new document appears
-    actual_doc = doc_name
+    actual_doc = effective_name
     for _ in range(20):
         time.sleep(0.5)
         after = list_documents_as()
@@ -404,13 +418,11 @@ def setup_output_document(template_path: str, doc_name: str) -> str:
             actual_doc = new[0]
             break
 
-    # Numbers may finalise the document name differently (e.g. appends ".numbers").
-    # Re-query via JXA to get the exact settled name.
     time.sleep(1)
     confirm_jxa = f'''
 var app = Application("Numbers");
 var docs = app.documents();
-var base = {json.dumps(doc_name)};
+var base = {json.dumps(effective_name)};
 var found = {json.dumps(actual_doc)};
 for (var i = 0; i < docs.length; i++) {{
   var n = docs[i].name();
@@ -430,70 +442,8 @@ found;
     return actual_doc
 
 
-def _apply_column_formatting_jxa(doc: str, sheet: str, table: str,
-                                   col_map: dict, month_headers: list,
-                                   is_ira: bool, tot_row: int, col_widths: list):
-    """Apply column widths, number formats, and bold to header/totals via JXA.
-
-    Used when a sheet is created blank (not from the template), so formatting
-    must be applied explicitly.  Column widths are copied from the template.
-    """
-    currency_cols = [
-        "Price", "Price Change", "Price Paid", "Cost Basis", "Market Value",
-        "Gain", "Ann Div", "Next Div Ttl",
-    ] + month_headers
-    pct_cols = ["% Change", "% Gain", "Gain %", "Div %", "Cost Div %"]
-    if is_ira:
-        pct_cols.append("% of Portfolio")
-    num_cols_list = ["Shares"]
-
-    currency_idxs = [i for h in currency_cols if (i := col_map.get(h))]
-    pct_idxs      = [i for h in pct_cols       if (i := col_map.get(h))]
-    num_idxs      = [i for h in num_cols_list   if (i := col_map.get(h))]
-
-    widths_js = json.dumps([float(w) if w is not None else 0 for w in col_widths])
-
-    jxa = f'''
-var app = Application("Numbers");
-var tbl = app.documents[{json.dumps(doc)}].sheets[{json.dumps(sheet)}].tables[{json.dumps(table)}];
-var nCols = tbl.columnCount();
-
-// Bold header and totals rows
-for (var c = 0; c < nCols; c++) {{
-  try {{ tbl.rows[0].cells[c].bold = true; }} catch(e) {{}}
-  try {{ tbl.rows[{tot_row - 1}].cells[c].bold = true; }} catch(e) {{}}
-}}
-
-// Number formats
-var currencyIdxs = {json.dumps(currency_idxs)};
-var pctIdxs      = {json.dumps(pct_idxs)};
-var numIdxs      = {json.dumps(num_idxs)};
-for (var i = 0; i < currencyIdxs.length; i++) {{
-  try {{ tbl.columns[currencyIdxs[i] - 1].format = "currency"; }} catch(e) {{}}
-}}
-for (var i = 0; i < pctIdxs.length; i++) {{
-  try {{ tbl.columns[pctIdxs[i] - 1].format = "percentage"; }} catch(e) {{}}
-}}
-for (var i = 0; i < numIdxs.length; i++) {{
-  try {{ tbl.columns[numIdxs[i] - 1].format = "number"; }} catch(e) {{}}
-}}
-
-// Column widths from template
-var widths = {widths_js};
-for (var i = 0; i < widths.length && i < nCols; i++) {{
-  if (widths[i] > 0) {{
-    try {{ tbl.columns[i].width = widths[i]; }} catch(e) {{}}
-  }}
-}}
-
-"ok"
-'''
-    run_jxa_file(jxa)
-
-
 def clear_data_rows_as(doc: str, sheet: str, table: str,
                         num_cols: int, from_row: int, to_row: int):
-    """Clear cell values in rows from_row..to_row (1-based, inclusive). Preserves formatting."""
     jxa = f'''
 var app = Application("Numbers");
 var tbl = app.documents[{json.dumps(doc)}].sheets[{json.dumps(sheet)}].tables[{json.dumps(table)}];
@@ -508,7 +458,6 @@ for (var r = {from_row - 1}; r < {to_row}; r++) {{
 
 
 def resize_table_as(doc: str, sheet: str, table: str, num_rows: int):
-    """Set the row count of the given table via JXA (AppleScript row count is read-only)."""
     jxa = f'''
 var app = Application("Numbers");
 var tbl = app.documents[{json.dumps(doc)}].sheets[{json.dumps(sheet)}].tables[{json.dumps(table)}];
@@ -574,7 +523,6 @@ def parse_maturity_date(description):
 
 
 def col_letter(n):
-    """1-based column index → letter(s): 1→A, 27→AA."""
     result = ""
     while n > 0:
         n, r = divmod(n - 1, 26)
@@ -583,23 +531,15 @@ def col_letter(n):
 
 
 def _resolve_named_refs(formula: str, col_map: dict) -> str:
-    """Convert Numbers internal named column refs like 'Shares 16' → 'G2'.
-
-    Numbers stores formulas using header-name refs ('Shares 16', 'Price 16') where
-    the trailing number is an internal table ID, not a column index.  subst_row()
-    only handles cell-letter refs like 'G2', so we normalise here after reading the
-    template so that all formulas use the portable letter form.
-    """
+    """Convert Numbers internal named column refs like 'Shares 16' → 'G2'."""
     if not formula or not formula.startswith("="):
         return formula
     header_to_letter = {h: col_letter(i) for h, i in col_map.items() if h and h.strip()}
-    # Longest headers first so 'Market Value' matches before 'Value'
     headers_sorted = sorted(header_to_letter.keys(), key=len, reverse=True)
     result = formula
     for header in headers_sorted:
         letter = header_to_letter[header]
         result = re.sub(re.escape(header) + r"\s+\d+", letter + "2", result)
-    # Normalise Unicode math operators Numbers uses in formula display
     result = result.replace("×", "*").replace("−", "-").replace("÷", "/")
     return result
 
@@ -628,7 +568,6 @@ def derive_month_headers(csv_path):
 
 
 def subst_row(formula_row, r):
-    """Replace template row-2 column references with actual row r."""
     result = []
     for cell in formula_row:
         if cell and str(cell).startswith("="):
@@ -810,20 +749,16 @@ def _build_fallback_totals(col_map, num_cols, last_data, tot_row):
     return row
 
 
-# ── Sheet Builder ─────────────────────────────────────────────────────────────
+# ── Sheet Builder ──────────────────────────────────────────────────────────────
 
 def build_sheet(doc: str, sheet_name: str, positions: list,
                 col_map_orig: dict, headers_orig: list, formula_row_orig: list,
                 num_cols: int, col_widths: list, month_headers: list,
-                is_ira: bool = False, use_template: bool = False) -> int:
-    """Populate a Numbers sheet with portfolio data.
+                is_ira: bool = False, template_sheet: str = "_template1") -> int:
+    """Populate a Numbers sheet by writing into the pre-formatted template_sheet,
+    then renaming it to sheet_name.
 
-    use_template=True  — The output document was created by copying the template
-      file, so the _template sheet already exists with full formatting.  Data is
-      written directly to that sheet, which is renamed to sheet_name at the end.
-
-    use_template=False — A blank sheet is created and column widths + number
-      formats are copied from the template before writing data.
+    Returns tot_row (the totals row index).
     """
     TABLE = "My Portfolio"
     n = len(positions)
@@ -836,33 +771,18 @@ def build_sheet(doc: str, sheet_name: str, positions: list,
     headers    = list(headers_orig)
     formula_row = list(formula_row_orig)
 
-    # IRA: rename "Gain %" → "% of Portfolio"
     gain_pct_idx = col_map.get("Gain %")
     if is_ira and gain_pct_idx:
         col_map["% of Portfolio"] = gain_pct_idx
         del col_map["Gain %"]
         headers[gain_pct_idx - 1] = "% of Portfolio"
 
-    print(f"\n  Creating sheet '{sheet_name}' ({n} positions)...")
+    print(f"\n  Building sheet '{sheet_name}' ({n} positions) from {template_sheet}...")
 
-    if use_template:
-        # ── Template path: write directly into the _template sheet ──
-        # The sheet and table already exist with full formatting from the template.
-        working_sheet = "_template"
+    resize_table_as(doc, template_sheet, TABLE, total_rows)
+    clear_data_rows_as(doc, template_sheet, TABLE, num_cols, 2, total_rows)
 
-        # Resize the existing table, then clear rows 2+
-        resize_table_as(doc, working_sheet, TABLE, total_rows)
-        clear_data_rows_as(doc, working_sheet, TABLE, num_cols, 2, total_rows)
-        print(f"    Using _template sheet (full formatting preserved)")
-    else:
-        # ── Blank path: create a new sheet + table, copy formatting ──
-        working_sheet = sheet_name
-        add_sheet_and_table_as(doc, sheet_name, TABLE, total_rows, num_cols)
-        _apply_column_formatting_jxa(doc, sheet_name, TABLE, col_map,
-                                     month_headers, is_ira, tot_row, col_widths)
-        print(f"    Created blank sheet with column widths and formats applied")
-
-    # ── Build header row with month-name overrides ──
+    # ── Header row with month-name overrides ──
     header_row = list(headers)
     month_col_start = None
     for key in sorted(col_map, key=lambda k: col_map[k]):
@@ -876,9 +796,9 @@ def build_sheet(doc: str, sheet_name: str, positions: list,
             header_row[ci] = mh
             if old_key and old_key in col_map:
                 col_map[mh] = col_map.pop(old_key)
-    _write_single_row_as(doc, working_sheet, TABLE, 1, header_row)
+    _write_single_row_as(doc, template_sheet, TABLE, 1, header_row)
 
-    # ── Build and write data rows ──
+    # ── Build and batch-write data rows ──
     k_letter = col_letter(col_map.get("Market Value", 11))
     pct_idx  = col_map.get("% of Portfolio") if is_ira else None
 
@@ -890,10 +810,10 @@ def build_sheet(doc: str, sheet_name: str, positions: list,
             row[pct_idx - 1] = f'=IFERROR({k_letter}{r}/{k_letter}{tot_row},"–")'
         data_rows.append(row)
 
-    print(f"    Writing {len(positions)} data rows...")
-    _write_rows_as(doc, working_sheet, TABLE, 2, data_rows)
+    print(f"    Writing {n} data rows (batch)...")
+    _write_rows_as_batch(doc, template_sheet, TABLE, 2, data_rows)
 
-    # ── Write totals row ──
+    # ── Totals row ──
     totals = _build_fallback_totals(col_map, num_cols, last_data, tot_row)
     label = "Portfolio-IRA" if is_ira else "Portfolio"
     a_idx = col_map.get("idx", 1)
@@ -901,18 +821,134 @@ def build_sheet(doc: str, sheet_name: str, positions: list,
         totals[a_idx - 1] = label
     if is_ira and pct_idx:
         totals[pct_idx - 1] = 1.0
-    _write_single_row_as(doc, working_sheet, TABLE, tot_row, totals)
+    _write_single_row_as(doc, template_sheet, TABLE, tot_row, totals)
 
     # ── Tax rows (brokerage only) ──
     if not is_ira:
-        _write_tax_rows_as(doc, working_sheet, TABLE, tot_row + 2)
+        _write_tax_rows_as(doc, template_sheet, TABLE, tot_row + 2)
 
-    # ── Rename _template → sheet_name (template path only) ──
-    if use_template:
-        rename_sheet_as(doc, "_template", sheet_name)
-
-    print(f"  Sheet '{sheet_name}' complete.")
+    rename_sheet_as(doc, template_sheet, sheet_name)
+    print(f"  ✓ Sheet '{sheet_name}' complete.")
     return tot_row
+
+
+# ── Dividend Gap-Fill ──────────────────────────────────────────────────────────
+
+def fill_dividends(doc: str, sheet_positions: dict, col_map: dict):
+    """Use Claude API with web search to fill missing dividend data.
+
+    sheet_positions: {sheet_name: [(row_index, position), ...]}
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return
+
+    try:
+        import anthropic
+    except ImportError:
+        print("  NOTE: 'anthropic' package not installed; skipping dividend fill.")
+        return
+
+    # Collect equities with potentially missing dividend data
+    to_fill = []
+    for sheet_name, rows in sheet_positions.items():
+        for row_idx, pos in rows:
+            sym = pos.get("display_symbol") or pos.get("symbol", "")
+            if not sym or pos["is_tbill"] or pos["is_cd"] or pos["is_money_market"]:
+                continue
+            to_fill.append((sheet_name, row_idx, sym, pos["description"]))
+
+    if not to_fill:
+        return
+
+    symbols = sorted({sym for _, _, sym, _ in to_fill})
+    print(f"\n  Filling dividend data for {len(symbols)} symbols via Claude API...")
+
+    client = anthropic.Anthropic(api_key=api_key)
+    prompt = (
+        f"For each stock symbol, provide current dividend data. "
+        f"Return ONLY valid JSON (no markdown), structured as:\n"
+        f'{{"SYMBOL": {{"div_per_share": <float or null>, "yield_pct": <float or null>, '
+        f'"ex_div_date": "<MM/DD/YYYY or null>", "pay_date": "<MM/DD/YYYY or null>", '
+        f'"divs_per_year": <int or null>}}}}\n\n'
+        f"Symbols: {', '.join(symbols)}"
+    )
+
+    try:
+        response = client.messages.create(
+            model="claude-opus-4-7",
+            max_tokens=4096,
+            tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}],
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception as e:
+        print(f"  WARNING: Claude API call failed: {e}")
+        return
+
+    # Extract JSON from response
+    raw_json = ""
+    for block in response.content:
+        if hasattr(block, "text"):
+            raw_json = block.text.strip()
+            break
+
+    try:
+        div_data = json.loads(raw_json)
+    except (json.JSONDecodeError, ValueError):
+        m = re.search(r"\{.*\}", raw_json, re.DOTALL)
+        if not m:
+            print("  WARNING: Could not parse dividend data from Claude response.")
+            return
+        try:
+            div_data = json.loads(m.group(0))
+        except Exception:
+            return
+
+    # Write dividend data back to Numbers
+    div_sh_col   = col_map.get("Ann Div / sh")
+    div_pct_col  = col_map.get("Div %")
+    ex_div_col   = col_map.get("Ex-Div Date")
+    pay_date_col = col_map.get("Div Pay Date")
+    divs_yr_col  = col_map.get("Divs/year")
+
+    TABLE = "My Portfolio"
+    filled = 0
+    for sheet_name, row_idx, sym, _ in to_fill:
+        info = div_data.get(sym)
+        if not info:
+            continue
+
+        stmts = []
+        if div_sh_col and info.get("div_per_share") is not None:
+            stmts.append(f"set value of cell {div_sh_col} of row {row_idx} to {float(info['div_per_share'])}")
+        if div_pct_col and info.get("yield_pct") is not None:
+            stmts.append(f"set value of cell {div_pct_col} of row {row_idx} to {float(info['yield_pct']) / 100}")
+        if ex_div_col and info.get("ex_div_date"):
+            stmts.append(f"set value of cell {ex_div_col} of row {row_idx} to {_as_str(info['ex_div_date'])}")
+        if pay_date_col and info.get("pay_date"):
+            stmts.append(f"set value of cell {pay_date_col} of row {row_idx} to {_as_str(info['pay_date'])}")
+        if divs_yr_col and info.get("divs_per_year") is not None:
+            stmts.append(f"set value of cell {divs_yr_col} of row {row_idx} to {int(info['divs_per_year'])}")
+
+        if stmts:
+            body = "\n        ".join(stmts)
+            script = f'''tell application "Numbers"
+  tell document {_as_str(doc)}
+    tell sheet {_as_str(sheet_name)}
+      tell table {_as_str(TABLE)}
+        {body}
+      end tell
+    end tell
+  end tell
+end tell'''
+            try:
+                run_applescript_file(script)
+                filled += 1
+            except RuntimeError as e:
+                print(f"  WARNING: Could not write dividend data for {sym}: {e}")
+
+    if filled:
+        print(f"  ✓ Dividend data filled for {filled} positions.")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -922,8 +958,14 @@ def main():
     parser.add_argument("csv_file")
     parser.add_argument("--template", default="Portfolio Template.numbers")
     parser.add_argument("--doc-name")
+    parser.add_argument("--output-dir", default=DESKTOP_DIR,
+                        help=f"Directory to save the output .numbers file (default: ~/Desktop)")
     parser.add_argument("--brokerage-only", action="store_true")
     parser.add_argument("--ira-only", action="store_true")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Parse CSV and report; do not open or modify Numbers")
+    parser.add_argument("--no-dividend-fill", action="store_true",
+                        help="Skip the Claude API dividend gap-fill step")
     args = parser.parse_args()
 
     print(f"Parsing {args.csv_file}...")
@@ -935,59 +977,90 @@ def main():
     for b, c in sorted(bucket_counts.items()):
         print(f"  {b}: {c}")
 
+    doc_name      = args.doc_name or derive_doc_name(args.csv_file)
+    month_headers = derive_month_headers(args.csv_file)
+    output_dir    = os.path.expanduser(args.output_dir)
+
+    print(f"\nDocument: '{doc_name}'")
+    print(f"Output:   {output_dir}")
+    print(f"Month columns: {', '.join(month_headers)}")
+
+    if args.dry_run:
+        brokerage = aggregate_positions(all_positions, {"BROKERAGE"})
+        ira = aggregate_positions(all_positions, {"IRA", "ROTH"})
+        print(f"\n[dry-run] Portfolio: {len(brokerage)} positions")
+        print(f"[dry-run] Portfolio-IRA: {len(ira)} positions")
+        return
+
     print(f"\nReading template '{args.template}'...")
     _tmpl_doc_name, col_map, headers, formula_row, num_cols, col_widths = read_template(args.template)
     template_path = _resolve_template_path(args.template)
     print(f"  Template: '{template_path}'")
     print(f"  {num_cols} columns, {len(col_map)} named headers")
 
-    doc_name      = args.doc_name or derive_doc_name(args.csv_file)
-    month_headers = derive_month_headers(args.csv_file)
-    print(f"\nDocument: '{doc_name}'")
-    print(f"Month columns: {', '.join(month_headers)}")
-
-    # ── Close any open document with the target name before copying ──
+    # Close any open document with the target name before copying
     print("\nPreparing document...")
     for d in list_documents_as():
-        if d == doc_name or re.match(re.escape(doc_name) + r" \d+$", d):
+        if d == doc_name or re.match(re.escape(doc_name) + r"( \(\d+\))?(.numbers)?$", d):
             close_document_as(d)
             print(f"  Closed existing '{d}'")
 
     print(f"Creating '{doc_name}' from template...")
-    actual_doc = setup_output_document(template_path, doc_name)
-    print(f"  Opened: '{actual_doc}'")
+    actual_doc = setup_output_document(template_path, doc_name, output_dir)
+    print(f"  ✓ Opened: '{actual_doc}'")
+
+    # Determine which template sheets are available (regex-based, tolerates typos like _templat6)
+    all_sheets = list_sheets_as(actual_doc)
+    available_templates = sorted(
+        [s for s in all_sheets if TEMPLATE_SHEET_RE.match(s)],
+        key=lambda s: int(TEMPLATE_SHEET_RE.match(s).group(1)),
+    )
+    template_queue = list(available_templates)
 
     summary = {}
-    template_used = False  # tracks whether _template sheet has been consumed
+    sheet_positions_for_divs = {}  # for dividend fill
+
+    def next_template() -> str:
+        if not template_queue:
+            sys.exit("ERROR: Ran out of template sheets. Add more _templateN sheets to the template.")
+        return template_queue.pop(0)
 
     if not args.ira_only:
         brokerage = aggregate_positions(all_positions, {"BROKERAGE"})
+        tmpl = next_template()
         build_sheet(actual_doc, "Portfolio", brokerage,
                     col_map, list(headers), list(formula_row),
                     num_cols, col_widths, month_headers,
-                    is_ira=False, use_template=True)
-        template_used = True
+                    is_ira=False, template_sheet=tmpl)
         summary["Portfolio"] = {
             "positions":    len(brokerage),
             "market_value": sum(p["current_value"] for p in brokerage),
             "cost_basis":   sum(p["cost_basis_total"] or 0 for p in brokerage),
         }
+        sheet_positions_for_divs["Portfolio"] = [(i + 2, p) for i, p in enumerate(brokerage)]
 
     if not args.brokerage_only:
         ira = aggregate_positions(all_positions, {"IRA", "ROTH"})
+        tmpl = next_template()
         build_sheet(actual_doc, "Portfolio-IRA", ira,
                     col_map, list(headers), list(formula_row),
                     num_cols, col_widths, month_headers,
-                    is_ira=True, use_template=not template_used)
+                    is_ira=True, template_sheet=tmpl)
         summary["Portfolio-IRA"] = {
             "positions":    len(ira),
             "market_value": sum(p["current_value"] for p in ira),
             "cost_basis":   sum(p["cost_basis_total"] or 0 for p in ira),
         }
+        sheet_positions_for_divs["Portfolio-IRA"] = [(i + 2, p) for i, p in enumerate(ira)]
 
-    # Remove _template if it wasn't consumed (e.g. both sheets used blank path)
-    if not template_used:
-        delete_sheet_as(actual_doc, "_template")
+    # Delete unused template sheets
+    for unused in template_queue:
+        print(f"  Deleting unused template sheet '{unused}'...")
+        delete_sheet_as(actual_doc, unused)
+
+    # Dividend gap-fill
+    if not args.no_dividend_fill:
+        fill_dividends(actual_doc, sheet_positions_for_divs, col_map)
 
     print("\n" + "=" * 56)
     print("SUMMARY")
@@ -1000,6 +1073,7 @@ def main():
         print(f"  Cost Basis:   ${t['cost_basis']:>13,.2f}")
         print(f"  Gain/Loss:    ${gain:>13,.2f}")
     print(f"\nDocument: '{actual_doc}'")
+    print(f"Saved to: {output_dir}")
 
 
 if __name__ == "__main__":
