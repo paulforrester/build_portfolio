@@ -78,6 +78,7 @@ Total: ~7 `osascript` calls per sheet (resize, clear, header row, batch statics,
 5. `_write_tax_rows_as` — Portfolio only; writes rates as pre-formatted strings ("16.44%") because Numbers `set format … to percentage` is unreliable in this context
 6. `rename_sheet_as` — renames `_templateN` to the final sheet name
 7. `spot_check_sheet` — reads back key cells via JXA and prints row 2, totals, and T-Bill MV sanity check
+8. Returns `tot_row` (the 1-based totals row index) — captured by `main()` and passed to `build_summary_sheet()`
 
 ### Output Document Setup
 - Output defaults to `~/Desktop/{doc_name}.numbers`
@@ -178,6 +179,32 @@ In `build_data_row`, 401k positions short-circuit the normal formula path:
 T-Bills are detected by: symbol matching `^\d{9}[A-Z]\d$` or description containing "treasury bill", "treas bills", etc. For T-Bills:
 - Price (col D): hardcoded from CSV last price (no STOCK() formula)
 - Market Value (col K): `=IFERROR(D{r}*(G{r}/100),"–")` — T-Bills are quoted per $100 face value
+
+### Summary Sheet
+After all four portfolio sheets are built and unused templates are deleted, `build_summary_sheet(doc, tot_rows, col_map)` creates a **Summary** sheet positioned first in the document (before Portfolio).
+
+`tot_rows` is a dict of `{sheet_name: totals_row_number}` containing only sheets that were actually built. `build_sheet()` returns its totals row number; `main()` captures these and passes them through.
+
+The Summary sheet contains a table named **Portfolio Summary** (8 rows × 6 columns):
+
+| Row | Col A | Col B | Col C | Col D | Col E | Col F |
+|-----|-------|-------|-------|-------|-------|-------|
+| 1 | (header) | Market Value | Cost Basis | Gain / Loss | % Gain | % of Total |
+| 2 | Brokerage | `='Portfolio'::My Portfolio::K{tot}` | `=...::J{tot}` | `=B2-C2` | `=IFERROR(D2/C2,"–")` | `=IFERROR(B2/B$7,"–")` |
+| 3 | Cash & T-Bills | `='Portfolio-Cash'::...` | … | … | … | … |
+| 4 | IRA / 401k | `='Portfolio-IRA'::...` | … | … | … | … |
+| 5 | ROTH | `='Portfolio-ROTH'::...` | … | … | … | … |
+| 6 | (blank separator) | | | | | |
+| 7 | Total | `=SUM(B2:B5)` | `=SUM(C2:C5)` | `=SUM(D2:D5)` | `=IFERROR(D7/C7,"–")` | `=1` |
+| 8 | (spare) | | | | | |
+
+Cross-sheet formula syntax: `='SheetName'::My Portfolio::K{row}` — sheet names are single-quoted to handle hyphens. If a sheet was not built (partial run), its row is written with empty cells.
+
+`% of Total` (col F) references `B$7` (total MV row 7) so proportions are always live: `=IFERROR(B{r}/B$7,"–")`.
+
+**Formatting**: header row (row 1) and totals row (row 7) are bold; cols B–D (rows 2–7) use currency format; cols E–F use percentage format; col A widths 160pt, cols B–D 120pt, cols E–F 80pt.
+
+**Pie chart**: a pie chart named "Allocation by Account" is added to the right of the table using range `A2:B5` (account labels + market values). Chart creation is wrapped in `try/except` — if it fails, a `⚠` message is printed and the script continues without error. Do not rely on the chart being present.
 
 ### Dividend Gap-Fill
 After all sheets are written, if `ANTHROPIC_API_KEY` is set and `--no-dividend-fill` is not passed, `fill_dividends` calls the Claude API (claude-sonnet-4-20250514 with web_search tool) to look up dividend data for equity positions and writes results back to Numbers.

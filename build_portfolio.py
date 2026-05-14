@@ -1166,6 +1166,144 @@ def build_sheet(doc: str, sheet_name: str, positions: list,
     return tot_row
 
 
+# ── Summary Sheet ──────────────────────────────────────────────────────────────
+
+def build_summary_sheet(doc: str, tot_rows: dict, col_map: dict):
+    """Create a Summary sheet positioned first, with cross-sheet refs to each portfolio sheet.
+
+    tot_rows: {sheet_name: totals_row_number} — only for sheets that were actually built.
+    col_map: the template column map, used to derive Market Value and Cost Basis column letters.
+    """
+    SHEET = "Summary"
+    TABLE = "Portfolio Summary"
+
+    mv_col = col_letter(col_map.get("Market Value", 11))   # K
+    cb_col = col_letter(col_map.get("Cost Basis",   10))   # J
+
+    print(f"\n  Building sheet '{SHEET}'...")
+
+    # ── 1. Add sheet and move to position 1 ──
+    run_applescript_file(f'''tell application "Numbers"
+  tell document {_as_str(doc)}
+    set summarySheet to make new sheet with properties {{name: {_as_str(SHEET)}}}
+    move summarySheet to before sheet 1
+  end tell
+end tell''')
+
+    # ── 2. Rename default table ("Table 1") and resize to 8 rows × 6 cols ──
+    run_applescript_file(f'''tell application "Numbers"
+  tell document {_as_str(doc)}
+    tell sheet {_as_str(SHEET)}
+      set name of table 1 to {_as_str(TABLE)}
+    end tell
+  end tell
+end tell''')
+
+    run_jxa_file(f'''
+var app = Application("Numbers");
+var tbl = app.documents[{json.dumps(doc)}].sheets[{json.dumps(SHEET)}].tables[{json.dumps(TABLE)}];
+try {{ tbl.rowCount = 8; }} catch(e) {{}}
+try {{ tbl.columnCount = 6; }} catch(e) {{}}
+try {{ tbl.columns[0].width = 160; }} catch(e) {{}}
+try {{ tbl.columns[1].width = 120; }} catch(e) {{}}
+try {{ tbl.columns[2].width = 120; }} catch(e) {{}}
+try {{ tbl.columns[3].width = 120; }} catch(e) {{}}
+try {{ tbl.columns[4].width = 80; }} catch(e) {{}}
+try {{ tbl.columns[5].width = 80; }} catch(e) {{}}
+"ok"
+''')
+
+    # ── 3. Header row ──
+    _write_single_row_as(doc, SHEET, TABLE, 1,
+                         ["", "Market Value", "Cost Basis", "Gain / Loss", "% Gain", "% of Total"])
+
+    # ── 4. Data rows 2–5 (one per portfolio sheet; fixed positions) ──
+    ROW_DEFS = [
+        ("Portfolio",      "Brokerage"),
+        ("Portfolio-Cash", "Cash & T-Bills"),
+        ("Portfolio-IRA",  "IRA / 401k"),
+        ("Portfolio-ROTH", "ROTH"),
+    ]
+    data_rows = []
+    for i, (sheet_name, label) in enumerate(ROW_DEFS):
+        r = i + 2   # rows 2–5
+        tot = tot_rows.get(sheet_name)
+        if tot is not None:
+            # Single-quote sheet names so hyphens in names are handled correctly by Numbers
+            mv_ref = f"='{sheet_name}'::My Portfolio::{mv_col}{tot}"
+            cb_ref = f"='{sheet_name}'::My Portfolio::{cb_col}{tot}"
+            row = [
+                label,
+                mv_ref,
+                cb_ref,
+                f"=B{r}-C{r}",
+                f'=IFERROR(D{r}/C{r},"–")',
+                f'=IFERROR(B{r}/B$7,"–")',   # B$7 = Total MV (row 7)
+            ]
+        else:
+            row = [label, "", "", "", "", ""]
+        data_rows.append(row)
+    _write_rows_as_batch(doc, SHEET, TABLE, 2, data_rows)
+
+    # ── 5. Totals row (row 7; row 6 is a blank visual separator) ──
+    _write_single_row_as(doc, SHEET, TABLE, 7, [
+        "Total",
+        "=SUM(B2:B5)",
+        "=SUM(C2:C5)",
+        "=SUM(D2:D5)",
+        '=IFERROR(D7/C7,"–")',
+        "=1",   # always 100 %
+    ])
+
+    # ── 6. Formatting — bold header/totals, currency cols B–D, percentage cols E–F ──
+    try:
+        run_applescript_file(f'''tell application "Numbers"
+  tell document {_as_str(doc)}
+    tell sheet {_as_str(SHEET)}
+      tell table {_as_str(TABLE)}
+        set font bold of every cell of row 1 to true
+        set font bold of every cell of row 7 to true
+        repeat with r from 2 to 7
+          set format of cell 2 of row r to currency
+          set format of cell 3 of row r to currency
+          set format of cell 4 of row r to currency
+        end repeat
+        repeat with r from 2 to 7
+          set format of cell 5 of row r to percentage
+          set format of cell 6 of row r to percentage
+        end repeat
+      end tell
+    end tell
+  end tell
+end tell''')
+    except RuntimeError as e:
+        print(f"  WARNING: Could not apply Summary formatting: {e}")
+
+    # ── 7. Pie chart — allocation by account (graceful degradation on failure) ──
+    try:
+        run_applescript_file(f'''tell application "Numbers"
+  tell document {_as_str(doc)}
+    set active sheet to sheet {_as_str(SHEET)}
+    tell sheet {_as_str(SHEET)}
+      set newChart to make new chart with properties {{ ¬
+        chart type: pie 2d, ¬
+        name: "Allocation by Account", ¬
+        data range: range "A2:B5" of table {_as_str(TABLE)} ¬
+      }}
+      set position of newChart to {{400, 50}}
+      set size of newChart to {{350, 300}}
+    end tell
+  end tell
+end tell''')
+        print("  ✓ Allocation pie chart added.")
+    except Exception as e:
+        print(f"  ⚠ Chart could not be created automatically — open the Summary sheet and"
+              f" insert a pie chart using columns A and B (account name + market value),"
+              f" rows 2–5.")
+
+    print(f"  ✓ Sheet '{SHEET}' complete.")
+
+
 # ── Dividend Gap-Fill ──────────────────────────────────────────────────────────
 
 def fill_dividends(doc: str, sheet_positions: dict, col_map: dict):
@@ -1385,6 +1523,7 @@ def main():
         if build_cash:   print(f"[dry-run] Portfolio-Cash: {len(brok_cash)} positions")
         if build_ira:    print(f"[dry-run] Portfolio-IRA:  {len(ira_list)} positions")
         if build_roth:   print(f"[dry-run] Portfolio-ROTH: {len(roth_list)} positions")
+        print(f"[dry-run] Summary:        (skipped — no sheets to reference in dry-run)")
         return
 
     # ── Close any existing output document ──
@@ -1423,9 +1562,12 @@ def main():
         pos["is_cash_instrument"] = True          # signals build_data_row for cash overrides
     brok_cash_ordered = order_cash_positions(brok_cash)
 
+    tot_rows: dict = {}  # sheet_name → totals row number; passed to build_summary_sheet
+
     if build_equity:
         tmpl = next_template()
-        build_sheet(actual_doc, "Portfolio", brok_equity,
+        tot_rows["Portfolio"] = build_sheet(
+                    actual_doc, "Portfolio", brok_equity,
                     col_map, list(headers), list(formula_row),
                     num_cols, col_widths, month_headers,
                     is_ira=False, has_tax_rows=True, template_sheet=tmpl)
@@ -1438,7 +1580,8 @@ def main():
 
     if build_cash:
         tmpl = next_template()
-        build_sheet(actual_doc, "Portfolio-Cash", brok_cash_ordered,
+        tot_rows["Portfolio-Cash"] = build_sheet(
+                    actual_doc, "Portfolio-Cash", brok_cash_ordered,
                     col_map, list(headers), list(formula_row),
                     num_cols, col_widths, month_headers,
                     is_ira=False, has_tax_rows=False, template_sheet=tmpl)
@@ -1452,7 +1595,8 @@ def main():
     if build_ira:
         ira = aggregate_positions(all_positions, "IRA")
         tmpl = next_template()
-        build_sheet(actual_doc, "Portfolio-IRA", ira,
+        tot_rows["Portfolio-IRA"] = build_sheet(
+                    actual_doc, "Portfolio-IRA", ira,
                     col_map, list(headers), list(formula_row),
                     num_cols, col_widths, month_headers,
                     is_ira=True, template_sheet=tmpl)
@@ -1466,7 +1610,8 @@ def main():
     if build_roth:
         roth = aggregate_positions(all_positions, "ROTH")
         tmpl = next_template()
-        build_sheet(actual_doc, "Portfolio-ROTH", roth,
+        tot_rows["Portfolio-ROTH"] = build_sheet(
+                    actual_doc, "Portfolio-ROTH", roth,
                     col_map, list(headers), list(formula_row),
                     num_cols, col_widths, month_headers,
                     is_ira=True, template_sheet=tmpl)
@@ -1482,6 +1627,9 @@ def main():
     for unused in template_queue:
         print(f"  Deleting unused template sheet '{unused}'...")
         delete_sheet_as(actual_doc, unused)
+
+    # ── Summary sheet (cross-sheet refs; must be built after all portfolio sheets are named) ──
+    build_summary_sheet(actual_doc, tot_rows, col_map)
 
     # ── Dividend gap-fill (Portfolio-Cash excluded — no dividends on T-Bills/MMs) ──
     if not args.no_dividend_fill:
