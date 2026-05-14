@@ -39,18 +39,19 @@ The template has `_template1` through `_template6` sheets (all identical, pre-fo
 
 ### Bulk Write Strategy (`_write_rows_as_batch`)
 Two osascript calls per sheet for all data rows:
-1. **Static values**: `set value of range "A2:Zn"` with a 2D AppleScript list (formula cells written as `""`)
-2. **Formulas**: one batched script with `set formula of cell "X2" to "IFERROR(...)"` for every formula cell (no leading `=`)
+1. **Static values**: one batched script with `set value of cell {col} of row {r} to {value}` for every non-empty, non-formula cell. Numbers rejects mixed-type 2D lists, so `set value of range` and `set value of cells of row N to {list}` cannot be used.
+2. **Formulas**: one batched script with `set value of cell {col} of row {r} to "=formula"` for every formula cell. Numbers parses strings beginning with `=` as formulas; `set formula of cell` is unreliable in this context.
 
-Total: ~4 `osascript` calls per sheet (resize/clear, header row, batch data, totals + tax).
+Total: ~7 `osascript` calls per sheet (resize, clear, header row, batch statics, batch formulas, totals row, tax rows; IRA sheets skip tax rows).
 
 ### Operation Order in `build_sheet`
 1. `resize_table_as` + `clear_data_rows_as` (JXA) — prepare the pre-formatted `_templateN` sheet
 2. `_write_single_row_as` — header row with month-name overrides
 3. `_write_rows_as_batch` — all data rows (static pass + formula pass)
 4. `_write_single_row_as` — totals row
-5. `_write_tax_rows_as` — Portfolio only (cell-level format set here)
+5. `_write_tax_rows_as` — Portfolio only; writes rates as pre-formatted strings ("16.44%") because Numbers `set format … to percentage` is unreliable in this context
 6. `rename_sheet_as` — renames `_templateN` to the final sheet name
+7. `spot_check_sheet` — reads back key cells via JXA and prints row 2, totals, and T-Bill MV sanity check
 
 ### Output Document Setup
 - Output defaults to `~/Desktop/{doc_name}.numbers`
