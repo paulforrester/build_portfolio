@@ -15,6 +15,7 @@ python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --doc-name "My Po
 python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --output-dir ~/Desktop
 python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --brokerage-only
 python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --ira-only
+python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --roth-only
 python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --dry-run
 python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --no-dividend-fill
 ```
@@ -33,7 +34,7 @@ Optional: `ANTHROPIC_API_KEY` env var enables dividend gap-filling via Claude AP
 - `run_jxa_file(script)` — JXA (JavaScript for Automation) via `osascript -l JavaScript <file>`, used for reading because JXA returns JSON-parseable output
 
 ### Template Structure
-The template has `_template1` through `_template6` sheets (all identical, pre-formatted with column widths, number formats, bold rows). The script consumes one per output sheet: `_template1` → Portfolio, `_template2` → Portfolio-IRA. Unused template sheets are deleted at the end.
+The template has `_template1` through `_template6` sheets (all identical, pre-formatted with column widths, number formats, bold rows). The script consumes one per output sheet: `_template1` → Portfolio, `_template2` → Portfolio-IRA, `_template3` → Portfolio-ROTH. Unused template sheets (`_template4`–`_template6`) are deleted at the end.
 
 `read_template` reads from `_template1` (falls back to `_template` for backward compatibility).
 
@@ -65,16 +66,13 @@ Total: ~7 `osascript` calls per sheet (resize, clear, header row, batch statics,
 - Account bucket classification uses normalized account names (non-alphanumeric → space)
 
 ### Account Buckets (checked in priority order)
-| Bucket | Matches (normalized, case-insensitive) |
-|--------|----------------------------------------|
-| SCHWAB | "schwab" |
-| BROKERAGE | "individual", "trust", "brokerage", "tod" |
-| IRA | "traditional ira", "rollover ira", "ira bda", "inherited" |
-| ROTH | "roth" |
-| 401K | "401k", "401 k" |
-| CMA | "cma", "cash management" |
+| Bucket | Matches (normalized account name, case-insensitive) | Output sheet |
+|--------|-----------------------------------------------------|--------------|
+| ROTH | contains "roth" | Portfolio-ROTH |
+| IRA | contains "ira" OR contains "401" | Portfolio-IRA |
+| BROKERAGE | everything else (catch-all) | Portfolio |
 
-SCHWAB must come before BROKERAGE (e.g., "Trust-Schwab" contains "trust" but is SCHWAB).
+Normalization: all non-alphanumeric characters → space, then lowercased. ROTH is checked first so "Roth IRA" accounts are not misclassified as IRA. The IRA bucket covers traditional IRA, rollover IRA, IRA BDA, and 401k accounts (the "401" substring catches "401(K)" after normalization). All non-tax-advantaged accounts — trust, CMA, joint checking, brokerage — fall into BROKERAGE.
 
 ### Formula Substitution
 Row-2 template formulas (e.g., `=IFERROR(STOCK(B2,0),"–")`) are substituted for each data row `r` using:
@@ -84,9 +82,39 @@ re.sub(r"([A-Z]+)2\b", lambda m: f"{m.group(1)}{r}", cell)
 
 `_resolve_named_refs` converts Numbers internal named column refs (e.g., `Shares 16`) to cell-letter refs (e.g., `G2`) after reading the template. This is necessary because Numbers stores formulas using header-name refs internally.
 
-### Sheet Differences: Portfolio vs Portfolio-IRA
-- **Portfolio**: BROKERAGE bucket only; column 15 header is "Gain %" with formula `=IFERROR((D{r}-I{r})/I{r},"–")`; includes tax rate rows below totals
-- **Portfolio-IRA**: IRA + ROTH buckets aggregated by symbol; column 15 header overridden to "% of Portfolio" with formula `=IFERROR(K{r}/K{tot_row},"–")`; same symbol across multiple IRA accounts has shares and cost basis summed
+### Sheet Differences
+| | Portfolio | Portfolio-IRA | Portfolio-ROTH |
+|---|---|---|---|
+| Bucket | BROKERAGE | IRA (incl. 401k) | ROTH |
+| Column 15 header | "Gain %" | "% of Portfolio" | "% of Portfolio" |
+| Column 15 formula | `=IFERROR((D{r}-I{r})/I{r},"–")` | `=IFERROR(K{r}/K{tot_row},"–")` | same as IRA |
+| Tax rate rows | yes (2 rows below totals) | no | no |
+| Totals label (col A) | "Portfolio" | "Portfolio-IRA" | "Portfolio-ROTH" |
+
+`is_ira=True` is passed to `build_sheet` for both Portfolio-IRA and Portfolio-ROTH — it controls the "% of Portfolio" override and suppresses the tax rows.
+
+### Position Aggregation per Bucket
+`aggregate_positions(all_positions, bucket)` processes one bucket at a time and returns rows in this order:
+
+1. **Equities / funds** — aggregated by symbol (shares and cost_basis_total summed; weighted average cost basis recalculated). Sorted by current value descending.
+2. **Money market funds** — *not* aggregated. Each account's holding becomes its own row. `display_symbol` is set to `"SYMBOL - Account Name"` (e.g. `"SPAXX - Trust: Under Agreement"`). Price is hardcoded as 1.00; Market Value is taken directly from the CSV.
+3. **T-Bills and CDs** — *not* aggregated. Sorted by maturity date ascending.
+
+**Missing cost basis**: if `cost_basis_total` is `None` when a symbol is first added to the equity accumulator, a `⚠` warning is printed and the value is treated as 0.
+
+**Missing avg cost basis for equities**: if `avg_cost_basis` is `--` in the CSV but `last_price > 0`, `last_price` is used as a temporary placeholder avg cost basis (so the gain column shows ~$0 for that lot instead of the full current value). A `# TODO: replace with actual cost basis when available` comment marks this in the code.
+
+### 401k Position Handling
+401k accounts (IRA bucket) have no ticker symbol — only a fund description. Detection: `is_401k = (not symbol) and bucket == "IRA"`.
+
+In `build_data_row`, 401k positions short-circuit the normal formula path:
+- **Col B (Symbol)**: empty string
+- **Col C (Name)**: fund description from CSV
+- **Col D (Price)**, **Col E (Price Change)**: hardcoded from CSV last price / last price change
+- **Col F (% Change)**: computed as `price_change / price`
+- **Col K (Market Value)**: hardcoded `current_value` from CSV (no live STOCK() formula)
+- **Col J (Cost Basis)**: `avg_cost_basis × quantity` if available, else `cost_basis_total`
+- All other formula columns (Gain, % Gain, Ann Div, etc.) keep their substituted formulas and evaluate correctly against the hardcoded static cells.
 
 ### Position Ordering
 1. Equities/funds by current value descending

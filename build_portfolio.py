@@ -22,15 +22,9 @@ NUMBERS_DIR = os.path.expanduser(
 
 MONEY_MARKET_SYMBOLS = {"SPAXX", "FZDXX", "FZROX", "FZILX", "FCASH"}
 
-# Order matters: more-specific rules first (schwab before trust)
-ACCOUNT_BUCKETS = [
-    ("SCHWAB",    ["schwab"]),
-    ("BROKERAGE", ["individual", "trust", "brokerage", "tod"]),
-    ("IRA",       ["traditional ira", "rollover ira", "ira bda", "inherited"]),
-    ("ROTH",      ["roth"]),
-    ("401K",      ["401k", "401 k"]),
-    ("CMA",       ["cma", "cash management"]),
-]
+# Three buckets checked in priority order: ROTH > IRA > BROKERAGE (catch-all).
+# IRA includes traditional IRA, rollover IRA, IRA BDA, and 401k accounts.
+# BROKERAGE is the catch-all for trust, CMA, joint, and any other non-tax-advantaged account.
 
 # Regex matching any _templateN-style sheet name (handles typos like _templat6)
 TEMPLATE_SHEET_RE = re.compile(r"^_templa\w*(\d+)$")
@@ -497,11 +491,11 @@ def clean_symbol(sym):
 
 def classify_account(account_name):
     normalized = re.sub(r"[^a-z0-9]+", " ", account_name.lower()).strip()
-    for bucket, keywords in ACCOUNT_BUCKETS:
-        for kw in keywords:
-            if kw in normalized:
-                return bucket
-    return "OTHER"
+    if "roth" in normalized:
+        return "ROTH"
+    if "ira" in normalized or "401" in normalized:
+        return "IRA"
+    return "BROKERAGE"
 
 
 def is_tbill(symbol, description):
@@ -668,6 +662,17 @@ def parse_csv(path):
         if (tbill or cd) and cost_basis is not None and quantity:
             avg_cb = fmt_money(cost_basis / (quantity / 100))
 
+        # When avg_cost_basis is missing for an equity with a known price, use last_price as a
+        # temporary placeholder so the gain column shows ~$0 rather than the full current value.
+        # TODO: replace with actual cost basis when available
+        if avg_cb is None and not (tbill or cd or mm) and last_price > 0 and quantity > 0:
+            avg_cb = last_price
+            if cost_basis is None:
+                cost_basis = fmt_money(avg_cb * quantity)
+
+        # 401k positions from IRA-bucket accounts have no ticker symbol.
+        is_401k = (not symbol) and bucket == "IRA"
+
         positions.append({
             "account_name": account_name,
             "bucket": bucket,
@@ -683,6 +688,7 @@ def parse_csv(path):
             "is_tbill": tbill,
             "is_cd": cd,
             "is_money_market": mm,
+            "is_401k": is_401k,
             "maturity_date": parse_maturity_date(description),
         })
 
@@ -691,41 +697,62 @@ def parse_csv(path):
 
 # ── Position Aggregation ───────────────────────────────────────────────────────
 
-def aggregate_positions(all_positions, buckets):
-    by_symbol = {}
+def aggregate_positions(all_positions, bucket):
+    """Aggregate positions for a single bucket into sheet rows.
+
+    Equities and funds are combined by symbol (weighted avg cost basis).
+    Money market funds are kept as individual rows with account name appended
+    to display_symbol (e.g. "SPAXX - Trust: Under Agreement").
+    T-Bills and CDs are kept as individual rows, sorted by maturity date.
+    """
+    equities_by_symbol = {}
+    money_markets = []
     tbills_cds = []
 
     for pos in all_positions:
-        if pos["bucket"] not in buckets:
+        if pos["bucket"] != bucket:
             continue
 
         if pos["is_tbill"] or pos["is_cd"]:
             tbills_cds.append(dict(pos))
             continue
 
+        if pos["is_money_market"]:
+            mm_pos = dict(pos)
+            # Each money market account gets its own row; append account name to symbol
+            # so "SPAXX" from two accounts appears as distinct rows.
+            mm_pos["display_symbol"] = f"{pos['symbol']} - {pos['account_name']}"
+            money_markets.append(mm_pos)
+            continue
+
+        # Regular equity / fund (including 401k) — aggregate by symbol within bucket
         sym = pos["symbol"]
-        if sym in by_symbol:
-            ex = by_symbol[sym]
+        if sym in equities_by_symbol:
+            ex = equities_by_symbol[sym]
             ex["quantity"] += pos["quantity"]
-            if pos["cost_basis_total"] is not None:
-                ex["cost_basis_total"] = (ex["cost_basis_total"] or 0.0) + pos["cost_basis_total"]
+            # Missing cost basis is treated as 0 to avoid aggregation errors.
+            pos_cb = pos["cost_basis_total"] or 0.0
+            ex["cost_basis_total"] = (ex["cost_basis_total"] or 0.0) + pos_cb
             ex["current_value"] += pos["current_value"]
         else:
-            by_symbol[sym] = dict(pos)
+            new_pos = dict(pos)
+            if new_pos["cost_basis_total"] is None:
+                print(f"  ⚠ {pos['symbol']} ({pos['account_name']}): no cost basis — using 0")
+                new_pos["cost_basis_total"] = 0.0
+                new_pos["avg_cost_basis"] = 0.0
+            equities_by_symbol[sym] = new_pos
 
     result = []
-    for pos in by_symbol.values():
+    for pos in equities_by_symbol.values():
         q = pos["quantity"]
         cb = pos["cost_basis_total"]
         if q and cb:
-            pos["avg_cost_basis"] = cb / q
+            pos["avg_cost_basis"] = round(cb / q, 2)
+        else:
+            pos["avg_cost_basis"] = 0.0
         result.append(pos)
 
-    equities = sorted(
-        [p for p in result if not p["is_money_market"]],
-        key=lambda p: p["current_value"], reverse=True,
-    )
-    money_markets = [p for p in result if p["is_money_market"]]
+    equities = sorted(result, key=lambda p: p["current_value"], reverse=True)
     tbills_cds.sort(key=lambda p: p["maturity_date"] or datetime.max)
 
     return equities + money_markets + tbills_cds
@@ -745,13 +772,32 @@ def build_data_row(pos, formula_row, col_map, r, is_ira=False):
         return col_letter(col_map.get(header, fallback_col))
 
     set_col("idx", r - 1)
-    set_col("Symbol", pos["display_symbol"] or pos["symbol"])
-    set_col("Name", pos["description"])
     set_col("Shares", fmt_qty(pos["quantity"]) if pos["quantity"] else "")
     set_col("Price Paid in US Dollars", 1.0)
 
     avg_cb = pos["avg_cost_basis"]
     set_col("Price Paid", fmt_money(avg_cb) if avg_cb is not None else "")
+
+    # 401k positions have no ticker; hardcode price/value columns and use description as name.
+    # Formula columns (Gain, % Gain, etc.) keep their substituted formulas — they reference
+    # the hardcoded static cells in the same row and will evaluate correctly.
+    if pos.get("is_401k"):
+        set_col("Symbol", "")
+        set_col("Name", pos["description"])
+        set_col("Price", pos["last_price"])
+        set_col("Price Change", pos["last_price_change"])
+        price = pos["last_price"] or 0.0
+        chg   = pos["last_price_change"] or 0.0
+        set_col("% Change", chg / price if price else 0.0)
+        set_col("Market Value", pos["current_value"])
+        qty   = pos["quantity"] or 0.0
+        a_cb  = pos.get("avg_cost_basis") or 0.0
+        cb    = fmt_money(a_cb * qty) if (a_cb and qty) else (pos.get("cost_basis_total") or 0.0)
+        set_col("Cost Basis", cb)
+        return row
+
+    set_col("Symbol", pos["display_symbol"] if pos["display_symbol"] != "" else pos["symbol"])
+    set_col("Name", pos["description"])
 
     if pos["is_tbill"] or pos["is_cd"]:
         # Bug 2/3: T-Bills quoted per $100 face value
@@ -977,7 +1023,7 @@ def build_sheet(doc: str, sheet_name: str, positions: list,
 
     # ── Totals row ──
     totals = _build_fallback_totals(col_map, num_cols, last_data, tot_row, month_headers)
-    label = "Portfolio-IRA" if is_ira else "Portfolio"
+    label = sheet_name
     a_idx = col_map.get("idx", 1)
     if a_idx:
         totals[a_idx - 1] = label
@@ -1127,6 +1173,7 @@ def main():
                         help=f"Directory to save the output .numbers file (default: ~/Desktop)")
     parser.add_argument("--brokerage-only", action="store_true")
     parser.add_argument("--ira-only", action="store_true")
+    parser.add_argument("--roth-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true",
                         help="Parse CSV and report; do not open or modify Numbers")
     parser.add_argument("--no-dividend-fill", action="store_true",
@@ -1136,11 +1183,22 @@ def main():
     print(f"Parsing {args.csv_file}...")
     all_positions = parse_csv(args.csv_file)
     print(f"  {len(all_positions)} rows parsed")
-    bucket_counts = {}
+
+    # Print account-to-bucket assignment
+    bucket_accounts: dict[str, list] = {}
     for p in all_positions:
-        bucket_counts[p["bucket"]] = bucket_counts.get(p["bucket"], 0) + 1
-    for b, c in sorted(bucket_counts.items()):
-        print(f"  {b}: {c}")
+        b = p["bucket"]
+        acc = p["account_name"]
+        if b not in bucket_accounts:
+            bucket_accounts[b] = []
+        if acc not in bucket_accounts[b]:
+            bucket_accounts[b].append(acc)
+
+    print("\nAccount buckets:")
+    for bucket_key in ["BROKERAGE", "IRA", "ROTH"]:
+        accs = bucket_accounts.get(bucket_key, [])
+        if accs:
+            print(f"  {bucket_key:<9}: {', '.join(accs)}")
 
     doc_name      = args.doc_name or derive_doc_name(args.csv_file)
     month_headers = derive_month_headers(args.csv_file)
@@ -1150,11 +1208,21 @@ def main():
     print(f"Output:   {output_dir}")
     print(f"Month columns: {', '.join(month_headers)}")
 
+    # Which sheets to build (each flag excludes the others; no flags = all three)
+    build_brokerage = not (args.ira_only or args.roth_only)
+    build_ira       = not (args.brokerage_only or args.roth_only)
+    build_roth      = not (args.brokerage_only or args.ira_only)
+
     if args.dry_run:
-        brokerage = aggregate_positions(all_positions, {"BROKERAGE"})
-        ira = aggregate_positions(all_positions, {"IRA", "ROTH"})
-        print(f"\n[dry-run] Portfolio: {len(brokerage)} positions")
-        print(f"[dry-run] Portfolio-IRA: {len(ira)} positions")
+        if build_brokerage:
+            brokerage = aggregate_positions(all_positions, "BROKERAGE")
+            print(f"\n[dry-run] Portfolio:      {len(brokerage)} positions")
+        if build_ira:
+            ira = aggregate_positions(all_positions, "IRA")
+            print(f"[dry-run] Portfolio-IRA:  {len(ira)} positions")
+        if build_roth:
+            roth = aggregate_positions(all_positions, "ROTH")
+            print(f"[dry-run] Portfolio-ROTH: {len(roth)} positions")
         return
 
     print(f"\nReading template '{args.template}'...")
@@ -1190,8 +1258,8 @@ def main():
             sys.exit("ERROR: Ran out of template sheets. Add more _templateN sheets to the template.")
         return template_queue.pop(0)
 
-    if not args.ira_only:
-        brokerage = aggregate_positions(all_positions, {"BROKERAGE"})
+    if build_brokerage:
+        brokerage = aggregate_positions(all_positions, "BROKERAGE")
         tmpl = next_template()
         build_sheet(actual_doc, "Portfolio", brokerage,
                     col_map, list(headers), list(formula_row),
@@ -1204,8 +1272,8 @@ def main():
         }
         sheet_positions_for_divs["Portfolio"] = [(i + 2, p) for i, p in enumerate(brokerage)]
 
-    if not args.brokerage_only:
-        ira = aggregate_positions(all_positions, {"IRA", "ROTH"})
+    if build_ira:
+        ira = aggregate_positions(all_positions, "IRA")
         tmpl = next_template()
         build_sheet(actual_doc, "Portfolio-IRA", ira,
                     col_map, list(headers), list(formula_row),
@@ -1218,7 +1286,21 @@ def main():
         }
         sheet_positions_for_divs["Portfolio-IRA"] = [(i + 2, p) for i, p in enumerate(ira)]
 
-    # Delete unused template sheets
+    if build_roth:
+        roth = aggregate_positions(all_positions, "ROTH")
+        tmpl = next_template()
+        build_sheet(actual_doc, "Portfolio-ROTH", roth,
+                    col_map, list(headers), list(formula_row),
+                    num_cols, col_widths, month_headers,
+                    is_ira=True, template_sheet=tmpl)
+        summary["Portfolio-ROTH"] = {
+            "positions":    len(roth),
+            "market_value": sum(p["current_value"] for p in roth),
+            "cost_basis":   sum(p["cost_basis_total"] or 0 for p in roth),
+        }
+        sheet_positions_for_divs["Portfolio-ROTH"] = [(i + 2, p) for i, p in enumerate(roth)]
+
+    # Delete unused template sheets (_template4, _template5, _template6 and any others not consumed)
     for unused in template_queue:
         print(f"  Deleting unused template sheet '{unused}'...")
         delete_sheet_as(actual_doc, unused)
@@ -1227,16 +1309,16 @@ def main():
     if not args.no_dividend_fill:
         fill_dividends(actual_doc, sheet_positions_for_divs, col_map)
 
-    print("\n" + "=" * 56)
-    print("SUMMARY")
-    print("=" * 56)
-    for sheet, t in summary.items():
+    print("\n" + "=" * 68)
+    print("Summary:")
+    for sheet_name, t in summary.items():
         gain = t["market_value"] - t["cost_basis"]
-        print(f"\n{sheet}:")
-        print(f"  Positions:    {t['positions']}")
-        print(f"  Market Value: ${t['market_value']:>13,.2f}")
-        print(f"  Cost Basis:   ${t['cost_basis']:>13,.2f}")
-        print(f"  Gain/Loss:    ${gain:>13,.2f}")
+        print(
+            f"  {sheet_name:<16} {t['positions']:>3} positions  "
+            f"MV: ${t['market_value']:>12,.0f}  "
+            f"Cost: ${t['cost_basis']:>12,.0f}  "
+            f"Gain: ${gain:>12,.0f}"
+        )
     print(f"\nDocument: '{actual_doc}'")
     print(f"Saved to: {output_dir}")
 
