@@ -13,7 +13,9 @@ python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv
 python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --template "Portfolio Template.numbers"
 python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --doc-name "My Portfolio"
 python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --output-dir ~/Desktop
-python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --brokerage-only
+python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --brokerage-only   # builds Portfolio + Portfolio-Cash
+python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --equity-only       # Portfolio only
+python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --cash-only         # Portfolio-Cash only
 python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --ira-only
 python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --roth-only
 python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --dry-run
@@ -22,7 +24,7 @@ python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --no-dividend-fil
 
 The script requires:
 1. Apple Numbers installed and accessible via `osascript`
-2. A template Numbers document with sheets named `_template1`–`_template6`, each containing a `My Portfolio` table — defaults to `"Portfolio Template.numbers"`
+2. A template Numbers document with sheets named `_template1`–`_template6` (and optionally a `_basis` sheet), each `_templateN` sheet containing a `My Portfolio` table — defaults to `"Portfolio Template.numbers"`
 
 Optional: `ANTHROPIC_API_KEY` env var enables dividend gap-filling via Claude API.
 
@@ -34,9 +36,32 @@ Optional: `ANTHROPIC_API_KEY` env var enables dividend gap-filling via Claude AP
 - `run_jxa_file(script)` — JXA (JavaScript for Automation) via `osascript -l JavaScript <file>`, used for reading because JXA returns JSON-parseable output
 
 ### Template Structure
-The template has `_template1` through `_template6` sheets (all identical, pre-formatted with column widths, number formats, bold rows). The script consumes one per output sheet: `_template1` → Portfolio, `_template2` → Portfolio-IRA, `_template3` → Portfolio-ROTH. Unused template sheets (`_template4`–`_template6`) are deleted at the end.
+The template has `_template1` through `_template6` sheets (all identical, pre-formatted with column widths, number formats, bold rows). The script consumes one per output sheet in this order:
+
+| Template sheet | Output sheet |
+|----------------|-------------|
+| `_template1` | Portfolio |
+| `_template2` | Portfolio-Cash |
+| `_template3` | Portfolio-IRA |
+| `_template4` | Portfolio-ROTH |
+
+Unused template sheets (`_template5`–`_template6`) are deleted at the end. The script uses a `template_queue` list — whichever templates exist are sorted and assigned in order, so sheets are consumed even if some are missing.
 
 `read_template` reads from `_template1` (falls back to `_template` for backward compatibility).
+
+### `_basis` Sheet (Optional Cost Basis Overrides)
+The template may contain a sheet named `_basis` with a table named `Basis`. This sheet is **never** deleted — it has no digit suffix so `TEMPLATE_SHEET_RE` (`^_templa\w*(\d+)$`) does not match it.
+
+The `Basis` table must have these columns (row 1 = header, data from row 2):
+
+| Column | Contents |
+|--------|----------|
+| A — Symbol | Ticker symbol (case-insensitive) |
+| B — Account | Exact account name as it appears in the Fidelity CSV |
+| C — Avg Cost Basis | Average cost per share (number or `$`-prefixed string) |
+| D — Notes | Optional; ignored by the script |
+
+`read_basis_overrides(template_doc_name)` reads this table via JXA after the template is open and returns `{(SYMBOL_UPPER, account_name): avg_cost_basis_float}`. In `parse_csv`, the override is applied when `avg_cost_basis` is missing or ≤ 0 for non-T-Bill positions — after the T-Bill cost basis derivation, before the `last_price` placeholder fallback. In dry-run mode the template is never opened, so `basis_overrides` is `{}`.
 
 ### Bulk Write Strategy (`_write_rows_as_batch`)
 Two osascript calls per sheet for all data rows:
@@ -83,15 +108,19 @@ re.sub(r"([A-Z]+)2\b", lambda m: f"{m.group(1)}{r}", cell)
 `_resolve_named_refs` converts Numbers internal named column refs (e.g., `Shares 16`) to cell-letter refs (e.g., `G2`) after reading the template. This is necessary because Numbers stores formulas using header-name refs internally.
 
 ### Sheet Differences
-| | Portfolio | Portfolio-IRA | Portfolio-ROTH |
-|---|---|---|---|
-| Bucket | BROKERAGE | IRA (incl. 401k) | ROTH |
-| Column 15 header | "Gain %" | "% of Portfolio" | "% of Portfolio" |
-| Column 15 formula | `=IFERROR((D{r}-I{r})/I{r},"–")` | `=IFERROR(K{r}/K{tot_row},"–")` | same as IRA |
-| Tax rate rows | yes (2 rows below totals) | no | no |
-| Totals label (col A) | "Portfolio" | "Portfolio-IRA" | "Portfolio-ROTH" |
+| | Portfolio | Portfolio-Cash | Portfolio-IRA | Portfolio-ROTH |
+|---|---|---|---|---|
+| Bucket | BROKERAGE equities | BROKERAGE cash | IRA (incl. 401k) | ROTH |
+| Positions included | All non-cash brokerage positions | Money markets, T-Bills, CDs, direct deposit | All IRA/401k positions | All Roth positions |
+| Column 15 header | "Gain %" | "Gain %" | "% of Portfolio" | "% of Portfolio" |
+| Column 15 formula | `=IFERROR((D{r}-I{r})/I{r},"–")` | same as Portfolio | `=IFERROR(K{r}/K{tot_row},"–")` | same as IRA |
+| Tax rate rows | yes (2 rows below totals) | no | no | no |
+| Totals label (col A) | "Portfolio" | "Portfolio-Cash" | "Portfolio-IRA" | "Portfolio-ROTH" |
+| Dividend fill | yes | no | yes | yes |
 
-`is_ira=True` is passed to `build_sheet` for both Portfolio-IRA and Portfolio-ROTH — it controls the "% of Portfolio" override and suppresses the tax rows.
+`is_ira=True` is passed to `build_sheet` for Portfolio-IRA and Portfolio-ROTH — controls "% of Portfolio" header override and suppresses tax rows.
+
+`has_tax_rows` parameter (new): `None` defaults to `not is_ira`; pass `False` explicitly for Portfolio-Cash (which is `is_ira=False` but still gets no tax rows).
 
 ### Position Aggregation per Bucket
 `aggregate_positions(all_positions, bucket)` processes one bucket at a time and returns rows in this order:
@@ -102,7 +131,31 @@ re.sub(r"([A-Z]+)2\b", lambda m: f"{m.group(1)}{r}", cell)
 
 **Missing cost basis**: if `cost_basis_total` is `None` when a symbol is first added to the equity accumulator, a `⚠` warning is printed and the value is treated as 0.
 
-**Missing avg cost basis for equities**: if `avg_cost_basis` is `--` in the CSV but `last_price > 0`, `last_price` is used as a temporary placeholder avg cost basis (so the gain column shows ~$0 for that lot instead of the full current value). A `# TODO: replace with actual cost basis when available` comment marks this in the code.
+**Missing avg cost basis for equities**: cost basis lookup applies in this priority order:
+1. `_basis` sheet override (highest priority, see `read_basis_overrides`)
+2. Value from the CSV `Average Cost Basis` column (if > 0)
+3. T-Bill cost basis derivation (T-Bills only: face value × quantity / 100)
+4. `last_price` as a placeholder (so gain shows ~$0 instead of full value). Marked with `⚠` in the dry-run output.
+
+### Brokerage Split: Portfolio vs Portfolio-Cash
+After `aggregate_positions("BROKERAGE")`, the result is split by `is_cash_position(pos)`:
+- **Portfolio** — positions where `is_cash_position` is `False` (equities and ETFs)
+- **Portfolio-Cash** — positions where `is_cash_position` is `True`
+
+```python
+def is_cash_position(pos) -> bool:
+    return (
+        pos["is_money_market"]
+        or pos["is_tbill"]
+        or pos["is_cd"]
+        or "direct deposit" in pos["description"].lower()
+        or "money market" in pos["description"].lower()
+    )
+```
+
+Cash positions get `pos["is_cash_instrument"] = True` before being passed to `build_sheet`. In `build_data_row`, cash instruments that are not money markets or T-Bills (e.g., direct deposit rows) use the same price=1.00 / cost-basis=MV logic as money markets (so Gain evaluates to $0).
+
+`order_cash_positions(positions)` sorts Portfolio-Cash rows: money markets by value descending, then other cash, then T-Bills/CDs by maturity date ascending.
 
 ### 401k Position Handling
 401k accounts (IRA bucket) have no ticker symbol — only a fund description. Detection: `is_401k = (not symbol) and bucket == "IRA"`.

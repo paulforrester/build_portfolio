@@ -4,17 +4,20 @@ Reads a Fidelity brokerage position export (CSV) and builds a fully populated Ap
 
 ## What it produces
 
-Three sheets in the output `.numbers` file:
+Four sheets in the output `.numbers` file:
 
 | Sheet | Contents |
 |---|---|
-| **Portfolio** | All taxable (brokerage) positions — trust, CMA, joint, etc. — sorted by value. Includes tax rate rows below the totals. |
+| **Portfolio** | Taxable (brokerage) equity and fund positions — trust, CMA, joint, etc. — sorted by value. Includes tax rate rows below the totals. |
+| **Portfolio-Cash** | Brokerage cash instruments: money market funds, T-Bills, CDs, and direct deposit entries. No tax rows. |
 | **Portfolio-IRA** | Traditional IRA, rollover IRA, IRA BDA, and 401k positions, aggregated by symbol across accounts. Shows each position as a % of total IRA value. |
 | **Portfolio-ROTH** | Roth IRA positions, aggregated by symbol. Shows each position as a % of total Roth value. |
 
-**Money market funds** (SPAXX, FZDXX, etc.) are not aggregated — each account gets its own row labelled `SYMBOL - Account Name` (e.g. `SPAXX - Trust: Under Agreement`).
+**Money market funds** (SPAXX, FZDXX, etc.) are not aggregated — each account gets its own row in Portfolio-Cash labelled `SYMBOL - Account Name` (e.g. `SPAXX - Trust: Under Agreement`).
 
 **401k positions** have no ticker symbol; price and market value are taken directly from the CSV rather than fetched via `STOCK()`.
+
+**Cost basis overrides**: if the template contains a `_basis` sheet with a `Basis` table (columns: Symbol, Account, Avg Cost Basis, Notes), those values override missing or zero cost basis from the CSV before the `last_price` placeholder fallback is used.
 
 Monthly dividend columns self-update every month via Numbers `MONTHNAME(NOW())` formulas — no script changes needed.
 
@@ -44,8 +47,10 @@ python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --doc-name "My Po
 # Use a different template file
 python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --template "My Template.numbers"
 
-# Build only one sheet
-python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --brokerage-only
+# Build a subset of sheets
+python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --brokerage-only  # Portfolio + Portfolio-Cash
+python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --equity-only     # Portfolio only
+python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --cash-only       # Portfolio-Cash only
 python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --ira-only
 python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --roth-only
 
@@ -60,7 +65,11 @@ Output defaults to `~/Desktop/{document name}.numbers`. If a file with that name
 
 ## Template preparation
 
-The script requires `Portfolio Template.numbers` (in the same directory, or specify with `--template`) with sheets named `_template1` through `_template6`. It consumes three of them (`_template1`→Portfolio, `_template2`→Portfolio-IRA, `_template3`→Portfolio-ROTH) and deletes the rest. Each sheet must contain a table named **My Portfolio** where:
+The script requires `Portfolio Template.numbers` (in the same directory, or specify with `--template`) with sheets named `_template1` through `_template6`. It consumes four of them in order (`_template1`→Portfolio, `_template2`→Portfolio-Cash, `_template3`→Portfolio-IRA, `_template4`→Portfolio-ROTH) and deletes the rest.
+
+**Optional:** add a sheet named `_basis` with a table named `Basis` (columns: Symbol, Account, Avg Cost Basis, Notes). The script reads it to override missing cost basis values from the CSV. This sheet is never deleted by the script.
+
+Each `_templateN` sheet must contain a table named **My Portfolio** where:
 
 - **Row 1** — column headers (Symbol, Name, Shares, Price, …)
 - **Row 2** — formula patterns using column-letter refs (e.g. `=IFERROR(STOCK(B2,0),"–")`). **Row 2 must have no data values** — if Numbers has converted the column-letter refs into named refs (e.g. `Shares QQQM`), clear the cells and re-enter the formulas with column letters.

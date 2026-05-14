@@ -273,6 +273,68 @@ JSON.stringify({{ docName: doc.name(), colCount: colCount, headers: headers, for
     return template_doc_name, col_map, headers, formula_row, num_cols, col_widths
 
 
+# ── Basis Override Reader ──────────────────────────────────────────────────────
+
+def read_basis_overrides(template_doc_name: str) -> dict:
+    """Read the _basis sheet from the already-open template document.
+
+    Returns {(SYMBOL_UPPER, account_name_exact): avg_cost_basis_float}.
+    Skips rows where Symbol or Account is empty. Skips the header row (index 0).
+    Returns an empty dict if the sheet or table is missing (no error).
+    """
+    jxa = f'''
+var app = Application("Numbers");
+var result = [];
+var docs = app.documents();
+var doc = null;
+for (var i = 0; i < docs.length; i++) {{
+  if (docs[i].name() === {json.dumps(template_doc_name)}) {{ doc = docs[i]; break; }}
+}}
+if (doc) {{
+  var sheets = doc.sheets();
+  var sheet = null;
+  for (var j = 0; j < sheets.length; j++) {{
+    if (sheets[j].name() === "_basis") {{ sheet = sheets[j]; break; }}
+  }}
+  if (sheet) {{
+    var tables = sheet.tables();
+    var table = null;
+    for (var k = 0; k < tables.length; k++) {{
+      if (tables[k].name() === "Basis") {{ table = tables[k]; break; }}
+    }}
+    if (table) {{
+      var rowCount = table.rowCount();
+      for (var r = 1; r < rowCount; r++) {{
+        try {{
+          var sym = String(table.rows[r].cells[0].value() || "").trim();
+          var acc = String(table.rows[r].cells[1].value() || "").trim();
+          var cb  = String(table.rows[r].cells[2].value() || "").trim();
+          if (sym && acc && cb) result.push([sym, acc, cb]);
+        }} catch(e) {{}}
+      }}
+    }}
+  }}
+}}
+JSON.stringify(result);
+'''
+    try:
+        raw = run_jxa_file(jxa)
+        rows = json.loads(raw)
+    except Exception as e:
+        print(f"  WARNING: Could not read _basis sheet: {e}")
+        return {}
+
+    overrides = {}
+    for row in rows:
+        sym, acc, cb_str = row
+        cb_str = re.sub(r"[$,\s]", "", cb_str)
+        try:
+            overrides[(sym.upper(), acc)] = float(cb_str)
+        except ValueError:
+            pass
+    return overrides
+
+
 # ── Batch Write Helpers ────────────────────────────────────────────────────────
 
 def _write_rows_as_batch(doc: str, sheet: str, table: str, start_row: int, rows: list):
@@ -518,6 +580,28 @@ def is_money_market(symbol, description):
     )
 
 
+def is_cash_position(pos) -> bool:
+    """Return True if the position belongs in Portfolio-Cash rather than Portfolio."""
+    return (
+        pos["is_money_market"]
+        or pos["is_tbill"]
+        or pos["is_cd"]
+        or "direct deposit" in pos["description"].lower()
+        or "money market" in pos["description"].lower()
+    )
+
+
+def order_cash_positions(positions: list) -> list:
+    """Order Portfolio-Cash rows: MMs by value desc, other cash, T-Bills by maturity."""
+    mm     = [p for p in positions if p["is_money_market"]]
+    tbills = [p for p in positions if p["is_tbill"] or p["is_cd"]]
+    other  = [p for p in positions
+              if not p["is_money_market"] and not p["is_tbill"] and not p["is_cd"]]
+    mm.sort(key=lambda p: p["current_value"], reverse=True)
+    tbills.sort(key=lambda p: p["maturity_date"] or datetime.max)
+    return mm + other + tbills
+
+
 def parse_maturity_date(description):
     m = re.search(r"(\d{1,2}/\d{1,2}/\d{4})", description)
     if m:
@@ -611,7 +695,10 @@ def subst_row(formula_row, r):
 
 # ── CSV Parsing ────────────────────────────────────────────────────────────────
 
-def parse_csv(path):
+def parse_csv(path, basis_overrides=None):
+    if basis_overrides is None:
+        basis_overrides = {}
+
     with open(path, newline="", encoding="utf-8-sig") as f:
         lines = f.readlines()
 
@@ -661,6 +748,15 @@ def parse_csv(path):
         # Bug 3: T-Bill avg_cost_basis = cost per $100 face value
         if (tbill or cd) and cost_basis is not None and quantity:
             avg_cb = fmt_money(cost_basis / (quantity / 100))
+
+        # _basis sheet override: highest-priority fallback for missing or zero avg cost basis.
+        # Applies to equities only (not T-Bills/CDs, which have their own derivation above).
+        if (avg_cb is None or avg_cb <= 0) and not (tbill or cd):
+            key = (symbol.upper(), account_name)
+            if key in basis_overrides:
+                avg_cb = basis_overrides[key]
+                cost_basis = fmt_money(avg_cb * quantity)
+                print(f"  ✓ {symbol} ({account_name}): cost basis from _basis sheet (${avg_cb:.2f})")
 
         # When avg_cost_basis is missing for an equity with a known price, use last_price as a
         # temporary placeholder so the gain column shows ~$0 rather than the full current value.
@@ -824,16 +920,41 @@ def build_data_row(pos, formula_row, col_map, r, is_ira=False):
             set_col(col_name, "")
 
     if pos["is_money_market"]:
-        # Bug 4: write static price and market value — don't let STOCK() formula run,
-        # which would pick up a percentage format from the template cell
+        # Hardcode price — don't let STOCK() formula run (it picks up a % format from template)
         set_col("Price", 1.0)
         set_col("Price Change", 0.0)
         set_col("% Change", 0.0)
-        # Write market value directly from CSV so blank-Shares rows still show a value
-        mv = pos.get("current_value")
-        if mv:
+        mv  = pos.get("current_value") or 0.0
+        qty = pos.get("quantity") or 0.0
+        d   = get_letter("Price", 4)
+        g   = get_letter("Shares", 7)
+        if qty > 0:
+            set_col("Market Value", f"={d}{r}*{g}{r}")
+        elif mv:
+            # Quantity is blank/zero but we still have a dollar balance — write it statically
             set_col("Market Value", fmt_money(mv))
-        for col_name in ("Gain", "% Gain", "Gain %", "Cost Basis"):
+        # Cost basis = market value so gain shows as $0
+        if mv:
+            set_col("Cost Basis", fmt_money(mv))
+        for col_name in ("Gain", "% Gain", "Gain %"):
+            set_col(col_name, "")
+
+    # Non-MM, non-T-Bill cash instruments on Portfolio-Cash (direct deposit etc.)
+    if pos.get("is_cash_instrument") and not pos["is_money_market"] and not pos["is_tbill"] and not pos["is_cd"]:
+        set_col("Price", 1.0)
+        set_col("Price Change", 0.0)
+        set_col("% Change", 0.0)
+        mv  = pos.get("current_value") or 0.0
+        qty = pos.get("quantity") or 0.0
+        d   = get_letter("Price", 4)
+        g   = get_letter("Shares", 7)
+        if qty > 0:
+            set_col("Market Value", f"={d}{r}*{g}{r}")
+        elif mv:
+            set_col("Market Value", fmt_money(mv))
+        if mv:
+            set_col("Cost Basis", fmt_money(mv))
+        for col_name in ("Gain", "% Gain", "Gain %"):
             set_col(col_name, "")
 
     return row
@@ -960,7 +1081,8 @@ JSON.stringify(result);
 def build_sheet(doc: str, sheet_name: str, positions: list,
                 col_map_orig: dict, headers_orig: list, formula_row_orig: list,
                 num_cols: int, col_widths: list, month_headers: list,
-                is_ira: bool = False, template_sheet: str = "_template1") -> int:
+                is_ira: bool = False, has_tax_rows: bool = None,
+                template_sheet: str = "_template1") -> int:
     """Populate a Numbers sheet by writing into the pre-formatted template_sheet,
     then renaming it to sheet_name.
 
@@ -1031,8 +1153,9 @@ def build_sheet(doc: str, sheet_name: str, positions: list,
         totals[pct_idx - 1] = 1.0
     _write_single_row_as(doc, template_sheet, TABLE, tot_row, totals)
 
-    # ── Tax rows (brokerage only) ──
-    if not is_ira:
+    # ── Tax rows (Portfolio only; not Portfolio-Cash, not IRA/ROTH sheets) ──
+    write_tax = (not is_ira) if has_tax_rows is None else has_tax_rows
+    if write_tax:
         _write_tax_rows_as(doc, template_sheet, TABLE, tot_row + 2)
 
     rename_sheet_as(doc, template_sheet, sheet_name)
@@ -1171,7 +1294,12 @@ def main():
     parser.add_argument("--doc-name")
     parser.add_argument("--output-dir", default=DESKTOP_DIR,
                         help=f"Directory to save the output .numbers file (default: ~/Desktop)")
-    parser.add_argument("--brokerage-only", action="store_true")
+    parser.add_argument("--brokerage-only", action="store_true",
+                        help="Build Portfolio + Portfolio-Cash (both brokerage sheets)")
+    parser.add_argument("--equity-only", action="store_true",
+                        help="Build Portfolio (brokerage equities) only")
+    parser.add_argument("--cash-only", action="store_true",
+                        help="Build Portfolio-Cash only")
     parser.add_argument("--ira-only", action="store_true")
     parser.add_argument("--roth-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true",
@@ -1180,58 +1308,86 @@ def main():
                         help="Skip the Claude API dividend gap-fill step")
     args = parser.parse_args()
 
-    print(f"Parsing {args.csv_file}...")
-    all_positions = parse_csv(args.csv_file)
-    print(f"  {len(all_positions)} rows parsed")
-
-    # Print account-to-bucket assignment
-    bucket_accounts: dict[str, list] = {}
-    for p in all_positions:
-        b = p["bucket"]
-        acc = p["account_name"]
-        if b not in bucket_accounts:
-            bucket_accounts[b] = []
-        if acc not in bucket_accounts[b]:
-            bucket_accounts[b].append(acc)
-
-    print("\nAccount buckets:")
-    for bucket_key in ["BROKERAGE", "IRA", "ROTH"]:
-        accs = bucket_accounts.get(bucket_key, [])
-        if accs:
-            print(f"  {bucket_key:<9}: {', '.join(accs)}")
-
     doc_name      = args.doc_name or derive_doc_name(args.csv_file)
     month_headers = derive_month_headers(args.csv_file)
     output_dir    = os.path.expanduser(args.output_dir)
+
+    # Which sheets to build.
+    # --brokerage-only builds both brokerage sheets; --equity-only / --cash-only select one.
+    # Each flag excludes non-matching sheets; no flags = all four.
+    build_equity = not (args.ira_only or args.roth_only or args.cash_only)
+    build_cash   = not (args.ira_only or args.roth_only or args.equity_only)
+    build_ira    = not (args.brokerage_only or args.equity_only or args.cash_only or args.roth_only)
+    build_roth   = not (args.brokerage_only or args.equity_only or args.cash_only or args.ira_only)
+
+    # ── Template + _basis (skipped in dry-run to avoid starting Numbers) ──
+    basis_overrides: dict = {}
+    col_map = headers = formula_row = num_cols = col_widths = None
+    template_path = _tmpl_doc_name = None
+
+    if not args.dry_run:
+        print(f"Reading template '{args.template}'...")
+        _tmpl_doc_name, col_map, headers, formula_row, num_cols, col_widths = read_template(args.template)
+        template_path = _resolve_template_path(args.template)
+        print(f"  Template: '{template_path}'")
+        print(f"  {num_cols} columns, {len(col_map)} named headers")
+
+        basis_overrides = read_basis_overrides(_tmpl_doc_name)
+        n_ov = len(basis_overrides)
+        if n_ov:
+            print(f"  {n_ov} cost basis override(s) loaded from _basis sheet")
+
+    # ── Parse CSV ──
+    print(f"\nParsing {args.csv_file}...")
+    all_positions = parse_csv(args.csv_file, basis_overrides)
+    print(f"  {len(all_positions)} rows parsed")
+
+    # ── Account-to-sheet assignment ──
+    brokerage_equity_accs: list = []
+    brokerage_cash_accs:   list = []
+    ira_accs:              list = []
+    roth_accs:             list = []
+    for p in all_positions:
+        acc = p["account_name"]
+        if p["bucket"] == "BROKERAGE":
+            if is_cash_position(p):
+                if acc not in brokerage_cash_accs:   brokerage_cash_accs.append(acc)
+            else:
+                if acc not in brokerage_equity_accs: brokerage_equity_accs.append(acc)
+        elif p["bucket"] == "IRA":
+            if acc not in ira_accs:   ira_accs.append(acc)
+        elif p["bucket"] == "ROTH":
+            if acc not in roth_accs:  roth_accs.append(acc)
+
+    print("\nAccount buckets:")
+    if brokerage_equity_accs:
+        print(f"  {'BROKERAGE equity':<16}: {', '.join(brokerage_equity_accs)}")
+    if brokerage_cash_accs:
+        print(f"  {'BROKERAGE cash':<16}: {', '.join(brokerage_cash_accs)}")
+    if ira_accs:
+        print(f"  {'IRA':<16}: {', '.join(ira_accs)}")
+    if roth_accs:
+        print(f"  {'ROTH':<16}: {', '.join(roth_accs)}")
 
     print(f"\nDocument: '{doc_name}'")
     print(f"Output:   {output_dir}")
     print(f"Month columns: {', '.join(month_headers)}")
 
-    # Which sheets to build (each flag excludes the others; no flags = all three)
-    build_brokerage = not (args.ira_only or args.roth_only)
-    build_ira       = not (args.brokerage_only or args.roth_only)
-    build_roth      = not (args.brokerage_only or args.ira_only)
-
+    # ── Dry run ──
     if args.dry_run:
-        if build_brokerage:
-            brokerage = aggregate_positions(all_positions, "BROKERAGE")
-            print(f"\n[dry-run] Portfolio:      {len(brokerage)} positions")
-        if build_ira:
-            ira = aggregate_positions(all_positions, "IRA")
-            print(f"[dry-run] Portfolio-IRA:  {len(ira)} positions")
-        if build_roth:
-            roth = aggregate_positions(all_positions, "ROTH")
-            print(f"[dry-run] Portfolio-ROTH: {len(roth)} positions")
+        brokerage_all = aggregate_positions(all_positions, "BROKERAGE")
+        brok_eq   = [p for p in brokerage_all if not is_cash_position(p)]
+        brok_cash = [p for p in brokerage_all if is_cash_position(p)]
+        ira_list  = aggregate_positions(all_positions, "IRA")
+        roth_list = aggregate_positions(all_positions, "ROTH")
+        print()
+        if build_equity: print(f"[dry-run] Portfolio:      {len(brok_eq)} positions")
+        if build_cash:   print(f"[dry-run] Portfolio-Cash: {len(brok_cash)} positions")
+        if build_ira:    print(f"[dry-run] Portfolio-IRA:  {len(ira_list)} positions")
+        if build_roth:   print(f"[dry-run] Portfolio-ROTH: {len(roth_list)} positions")
         return
 
-    print(f"\nReading template '{args.template}'...")
-    _tmpl_doc_name, col_map, headers, formula_row, num_cols, col_widths = read_template(args.template)
-    template_path = _resolve_template_path(args.template)
-    print(f"  Template: '{template_path}'")
-    print(f"  {num_cols} columns, {len(col_map)} named headers")
-
-    # Close any open document with the target name before copying
+    # ── Close any existing output document ──
     print("\nPreparing document...")
     for d in list_documents_as():
         if d == doc_name or re.match(re.escape(doc_name) + r"( \(\d+\))?(.numbers)?$", d):
@@ -1242,7 +1398,8 @@ def main():
     actual_doc = setup_output_document(template_path, doc_name, output_dir)
     print(f"  ✓ Opened: '{actual_doc}'")
 
-    # Determine which template sheets are available (regex-based, tolerates typos like _templat6)
+    # ── Template sheet queue ──
+    # TEMPLATE_SHEET_RE only matches _templateN sheets; _basis is excluded automatically.
     all_sheets = list_sheets_as(actual_doc)
     available_templates = sorted(
         [s for s in all_sheets if TEMPLATE_SHEET_RE.match(s)],
@@ -1250,27 +1407,47 @@ def main():
     )
     template_queue = list(available_templates)
 
-    summary = {}
-    sheet_positions_for_divs = {}  # for dividend fill
+    summary: dict = {}
+    sheet_positions_for_divs: dict = {}
 
     def next_template() -> str:
         if not template_queue:
             sys.exit("ERROR: Ran out of template sheets. Add more _templateN sheets to the template.")
         return template_queue.pop(0)
 
-    if build_brokerage:
-        brokerage = aggregate_positions(all_positions, "BROKERAGE")
+    # ── Brokerage split: Portfolio (equities) + Portfolio-Cash ──
+    brokerage_all = aggregate_positions(all_positions, "BROKERAGE")
+    brok_equity   = [p for p in brokerage_all if not is_cash_position(p)]
+    brok_cash     = [p for p in brokerage_all if is_cash_position(p)]
+    for pos in brok_cash:
+        pos["is_cash_instrument"] = True          # signals build_data_row for cash overrides
+    brok_cash_ordered = order_cash_positions(brok_cash)
+
+    if build_equity:
         tmpl = next_template()
-        build_sheet(actual_doc, "Portfolio", brokerage,
+        build_sheet(actual_doc, "Portfolio", brok_equity,
                     col_map, list(headers), list(formula_row),
                     num_cols, col_widths, month_headers,
-                    is_ira=False, template_sheet=tmpl)
+                    is_ira=False, has_tax_rows=True, template_sheet=tmpl)
         summary["Portfolio"] = {
-            "positions":    len(brokerage),
-            "market_value": sum(p["current_value"] for p in brokerage),
-            "cost_basis":   sum(p["cost_basis_total"] or 0 for p in brokerage),
+            "positions":    len(brok_equity),
+            "market_value": sum(p["current_value"] for p in brok_equity),
+            "cost_basis":   sum(p["cost_basis_total"] or 0 for p in brok_equity),
         }
-        sheet_positions_for_divs["Portfolio"] = [(i + 2, p) for i, p in enumerate(brokerage)]
+        sheet_positions_for_divs["Portfolio"] = [(i + 2, p) for i, p in enumerate(brok_equity)]
+
+    if build_cash:
+        tmpl = next_template()
+        build_sheet(actual_doc, "Portfolio-Cash", brok_cash_ordered,
+                    col_map, list(headers), list(formula_row),
+                    num_cols, col_widths, month_headers,
+                    is_ira=False, has_tax_rows=False, template_sheet=tmpl)
+        summary["Portfolio-Cash"] = {
+            "positions":    len(brok_cash_ordered),
+            "market_value": sum(p["current_value"] for p in brok_cash_ordered),
+            "cost_basis":   sum(p["cost_basis_total"] or 0 for p in brok_cash_ordered),
+        }
+        # Portfolio-Cash holds T-Bills and money markets — no dividend fill needed
 
     if build_ira:
         ira = aggregate_positions(all_positions, "IRA")
@@ -1300,12 +1477,13 @@ def main():
         }
         sheet_positions_for_divs["Portfolio-ROTH"] = [(i + 2, p) for i, p in enumerate(roth)]
 
-    # Delete unused template sheets (_template4, _template5, _template6 and any others not consumed)
+    # ── Delete unused template sheets (_template5, _template6, ...) ──
+    # _basis is not in template_queue (TEMPLATE_SHEET_RE requires a digit suffix) — safe to skip.
     for unused in template_queue:
         print(f"  Deleting unused template sheet '{unused}'...")
         delete_sheet_as(actual_doc, unused)
 
-    # Dividend gap-fill
+    # ── Dividend gap-fill (Portfolio-Cash excluded — no dividends on T-Bills/MMs) ──
     if not args.no_dividend_fill:
         fill_dividends(actual_doc, sheet_positions_for_divs, col_map)
 
