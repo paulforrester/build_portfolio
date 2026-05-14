@@ -1182,11 +1182,15 @@ def build_summary_sheet(doc: str, tot_rows: dict, col_map: dict):
 
     print(f"\n  Building sheet '{SHEET}'...")
 
-    # ── 1. Add sheet and move to position 1 ──
+    # ── 1. Add sheet at position 1 ──
+    # Use `at beginning` in the make command rather than a separate `move` call.
+    # `move sheet X to before sheet 1` is unreliable in Numbers: if the new sheet
+    # lands at position 1 by default, AppleScript errors "can't move object before
+    # itself"; in other versions `before` positional specifiers for sheets aren't
+    # supported at all.
     run_applescript_file(f'''tell application "Numbers"
   tell document {_as_str(doc)}
-    set summarySheet to make new sheet with properties {{name: {_as_str(SHEET)}}}
-    move summarySheet to before sheet 1
+    make new sheet at beginning of sheets with properties {{name: {_as_str(SHEET)}}}
   end tell
 end tell''')
 
@@ -1629,7 +1633,10 @@ def main():
         delete_sheet_as(actual_doc, unused)
 
     # ── Summary sheet (cross-sheet refs; must be built after all portfolio sheets are named) ──
-    build_summary_sheet(actual_doc, tot_rows, col_map)
+    try:
+        build_summary_sheet(actual_doc, tot_rows, col_map)
+    except Exception as e:
+        print(f"\n  ⚠ Summary sheet could not be created: {e}")
 
     # ── Dividend gap-fill (Portfolio-Cash excluded — no dividends on T-Bills/MMs) ──
     if not args.no_dividend_fill:
