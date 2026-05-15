@@ -1259,58 +1259,44 @@ try {{ tbl.columns[5].width = 80; }} catch(e) {{}}
         "=1",   # always 100 %
     ])
 
-    # ── 6. Formatting — bold header/totals, currency cols B–D, percentage cols E–F ──
-    # Use `set number format` (string value) rather than `set format … to currency/percentage`
-    # because the bare keywords conflict with AppleScript reserved words (error -2740).
+    # ── 6 & 7. Formatting + instruction cell — one batched AppleScript call ──
+    # Rules that avoid error -2740:
+    #   • bold:        tell cell C / set font bold to true / end tell
+    #   • number fmt:  set format of cell C of row R to number format "…"
+    #   • instruction: set value only — italic/color attempts cause -2740, so omit them
     try:
         run_applescript_file(f'''tell application "Numbers"
   tell document {_as_str(doc)}
     tell sheet {_as_str(SHEET)}
       tell table {_as_str(TABLE)}
-        set font bold of every cell of row 1 to true
-        set font bold of every cell of row 7 to true
+        tell row 1
+          repeat with c from 1 to 6
+            tell cell c
+              set font bold to true
+            end tell
+          end repeat
+        end tell
+        tell row 7
+          repeat with c from 1 to 6
+            tell cell c
+              set font bold to true
+            end tell
+          end repeat
+        end tell
         repeat with r from 2 to 7
-          tell cell 2 of row r
-            set number format to "$#,##0.00"
-          end tell
-          tell cell 3 of row r
-            set number format to "$#,##0.00"
-          end tell
-          tell cell 4 of row r
-            set number format to "$#,##0.00"
-          end tell
-          tell cell 5 of row r
-            set number format to "0.00%"
-          end tell
-          tell cell 6 of row r
-            set number format to "0.00%"
-          end tell
+          set format of cell 2 of row r to number format "$#,##0.00"
+          set format of cell 3 of row r to number format "$#,##0.00"
+          set format of cell 4 of row r to number format "$#,##0.00"
+          set format of cell 5 of row r to number format "0.00%"
+          set format of cell 6 of row r to number format "0.00%"
         end repeat
+        set value of cell 1 of row 9 to "To add pie chart: select A1:B5 -> Insert -> Chart -> Pie"
       end tell
     end tell
   end tell
 end tell''')
     except RuntimeError as e:
         print(f"  WARNING: Could not apply Summary formatting: {e}")
-
-    # ── 7. Instruction cell in row 9 — tells user how to add the pie chart manually ──
-    # `make new chart` via AppleScript is unreliable in Numbers; GUI scripting requires
-    # Accessibility permissions that may not be granted.  A manual insert takes ~5 seconds
-    # and only needs to be done once per document.
-    try:
-        run_applescript_file(f'''tell application "Numbers"
-  tell document {_as_str(doc)}
-    tell sheet {_as_str(SHEET)}
-      tell table {_as_str(TABLE)}
-        set value of cell 1 of row 9 to "To add pie chart: select A1:B5 → Insert → Chart → Pie"
-        set font italic of cell 1 of row 9 to true
-        set text color of cell 1 of row 9 to {{65535, 42000, 0}}
-      end tell
-    end tell
-  end tell
-end tell''')
-    except RuntimeError as e:
-        print(f"  WARNING: Could not write chart instruction cell: {e}")
 
     print(f"  ✓ Sheet '{SHEET}' complete.")
     print(f"  📊 Pie chart: open Numbers → Summary sheet → select A1:B5 → Insert → Chart → Pie (2D)")
