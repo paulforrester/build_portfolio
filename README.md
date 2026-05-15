@@ -4,14 +4,17 @@ Reads a Fidelity brokerage position export (CSV) and builds a fully populated Ap
 
 ## What it produces
 
-Four sheets in the output `.numbers` file:
+Five sheets in the output `.numbers` file (Summary is always first):
 
 | Sheet | Contents |
 |---|---|
+| **Summary** | Cross-sheet overview: Market Value, Cost Basis, Gain/Loss, % Gain, and % of Total for each account bucket plus a grand total. Live formulas reference the four portfolio sheets. |
 | **Portfolio** | Taxable (brokerage) equity and fund positions — trust, CMA, joint, etc. — sorted by value. Includes tax rate rows below the totals. |
 | **Portfolio-Cash** | Brokerage cash instruments: money market funds, T-Bills, CDs, and direct deposit entries. No tax rows. |
 | **Portfolio-IRA** | Traditional IRA, rollover IRA, IRA BDA, and 401k positions, aggregated by symbol across accounts. Shows each position as a % of total IRA value. |
 | **Portfolio-ROTH** | Roth IRA positions, aggregated by symbol. Shows each position as a % of total Roth value. |
+
+**Pie chart**: the Summary sheet includes an instruction cell prompting you to select `A1:B5 → Insert → Chart → Pie`. This takes about 5 seconds and only needs to be done once — the chart references live data after that.
 
 **Money market funds** (SPAXX, FZDXX, etc.) are not aggregated — each account gets its own row in Portfolio-Cash labelled `SYMBOL - Account Name` (e.g. `SPAXX - Trust: Under Agreement`).
 

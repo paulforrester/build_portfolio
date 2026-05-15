@@ -1206,7 +1206,7 @@ end tell''')
     run_jxa_file(f'''
 var app = Application("Numbers");
 var tbl = app.documents[{json.dumps(doc)}].sheets[{json.dumps(SHEET)}].tables[{json.dumps(TABLE)}];
-try {{ tbl.rowCount = 8; }} catch(e) {{}}
+try {{ tbl.rowCount = 9; }} catch(e) {{}}
 try {{ tbl.columnCount = 6; }} catch(e) {{}}
 try {{ tbl.columns[0].width = 160; }} catch(e) {{}}
 try {{ tbl.columns[1].width = 120; }} catch(e) {{}}
@@ -1260,6 +1260,8 @@ try {{ tbl.columns[5].width = 80; }} catch(e) {{}}
     ])
 
     # ── 6. Formatting — bold header/totals, currency cols B–D, percentage cols E–F ──
+    # Use `set number format` (string value) rather than `set format … to currency/percentage`
+    # because the bare keywords conflict with AppleScript reserved words (error -2740).
     try:
         run_applescript_file(f'''tell application "Numbers"
   tell document {_as_str(doc)}
@@ -1268,13 +1270,21 @@ try {{ tbl.columns[5].width = 80; }} catch(e) {{}}
         set font bold of every cell of row 1 to true
         set font bold of every cell of row 7 to true
         repeat with r from 2 to 7
-          set format of cell 2 of row r to currency
-          set format of cell 3 of row r to currency
-          set format of cell 4 of row r to currency
-        end repeat
-        repeat with r from 2 to 7
-          set format of cell 5 of row r to percentage
-          set format of cell 6 of row r to percentage
+          tell cell 2 of row r
+            set number format to "$#,##0.00"
+          end tell
+          tell cell 3 of row r
+            set number format to "$#,##0.00"
+          end tell
+          tell cell 4 of row r
+            set number format to "$#,##0.00"
+          end tell
+          tell cell 5 of row r
+            set number format to "0.00%"
+          end tell
+          tell cell 6 of row r
+            set number format to "0.00%"
+          end tell
         end repeat
       end tell
     end tell
@@ -1283,29 +1293,28 @@ end tell''')
     except RuntimeError as e:
         print(f"  WARNING: Could not apply Summary formatting: {e}")
 
-    # ── 7. Pie chart — allocation by account (graceful degradation on failure) ──
+    # ── 7. Instruction cell in row 9 — tells user how to add the pie chart manually ──
+    # `make new chart` via AppleScript is unreliable in Numbers; GUI scripting requires
+    # Accessibility permissions that may not be granted.  A manual insert takes ~5 seconds
+    # and only needs to be done once per document.
     try:
         run_applescript_file(f'''tell application "Numbers"
   tell document {_as_str(doc)}
-    set active sheet to sheet {_as_str(SHEET)}
     tell sheet {_as_str(SHEET)}
-      set newChart to make new chart with properties {{ ¬
-        chart type: pie 2d, ¬
-        name: "Allocation by Account", ¬
-        data range: range "A2:B5" of table {_as_str(TABLE)} ¬
-      }}
-      set position of newChart to {{400, 50}}
-      set size of newChart to {{350, 300}}
+      tell table {_as_str(TABLE)}
+        set value of cell 1 of row 9 to "To add pie chart: select A1:B5 → Insert → Chart → Pie"
+        set font italic of cell 1 of row 9 to true
+        set text color of cell 1 of row 9 to {{65535, 42000, 0}}
+      end tell
     end tell
   end tell
 end tell''')
-        print("  ✓ Allocation pie chart added.")
-    except Exception as e:
-        print(f"  ⚠ Chart could not be created automatically — open the Summary sheet and"
-              f" insert a pie chart using columns A and B (account name + market value),"
-              f" rows 2–5.")
+    except RuntimeError as e:
+        print(f"  WARNING: Could not write chart instruction cell: {e}")
 
     print(f"  ✓ Sheet '{SHEET}' complete.")
+    print(f"  📊 Pie chart: open Numbers → Summary sheet → select A1:B5 → Insert → Chart → Pie (2D)")
+    print(f"     (Takes ~5 seconds; only needed once — the chart will reference live data after that.)")
 
 
 # ── Dividend Gap-Fill ──────────────────────────────────────────────────────────

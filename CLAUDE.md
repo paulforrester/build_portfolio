@@ -185,7 +185,7 @@ After all four portfolio sheets are built and unused templates are deleted, `bui
 
 `tot_rows` is a dict of `{sheet_name: totals_row_number}` containing only sheets that were actually built. `build_sheet()` returns its totals row number; `main()` captures these and passes them through.
 
-The Summary sheet contains a table named **Portfolio Summary** (8 rows × 6 columns):
+The Summary sheet contains a table named **Portfolio Summary** (9 rows × 6 columns):
 
 | Row | Col A | Col B | Col C | Col D | Col E | Col F |
 |-----|-------|-------|-------|-------|-------|-------|
@@ -197,14 +197,15 @@ The Summary sheet contains a table named **Portfolio Summary** (8 rows × 6 colu
 | 6 | (blank separator) | | | | | |
 | 7 | Total | `=SUM(B2:B5)` | `=SUM(C2:C5)` | `=SUM(D2:D5)` | `=IFERROR(D7/C7,"–")` | `=1` |
 | 8 | (spare) | | | | | |
+| 9 | (pie chart instruction — italic, amber text) | | | | | |
 
 Cross-sheet formula syntax: `='SheetName'::My Portfolio::K{row}` — sheet names are single-quoted to handle hyphens. If a sheet was not built (partial run), its row is written with empty cells.
 
 `% of Total` (col F) references `B$7` (total MV row 7) so proportions are always live: `=IFERROR(B{r}/B$7,"–")`.
 
-**Formatting**: header row (row 1) and totals row (row 7) are bold; cols B–D (rows 2–7) use currency format; cols E–F use percentage format; col A widths 160pt, cols B–D 120pt, cols E–F 80pt.
+**Formatting**: header row (row 1) and totals row (row 7) are bold; cols B–D (rows 2–7) use `set number format to "$#,##0.00"`; cols E–F use `set number format to "0.00%"`; col A widths 160pt, cols B–D 120pt, cols E–F 80pt. Note: `set format of cell N of row R to currency/percentage` causes AppleScript error -2740 because those bare keywords are reserved — always use the `tell cell … set number format to "…"` pattern instead.
 
-**Pie chart**: a pie chart named "Allocation by Account" is added to the right of the table using range `A2:B5` (account labels + market values). Chart creation is wrapped in `try/except` — if it fails, a `⚠` message is printed and the script continues without error. Do not rely on the chart being present.
+**Pie chart**: `make new chart` via AppleScript is unreliable in Numbers and GUI scripting requires Accessibility permissions that may not be granted. Instead, the script writes an italic amber-colored instruction string to cell A9 (`"To add pie chart: select A1:B5 → Insert → Chart → Pie"`) and prints the same instruction to stdout at the end of the run. The chart is not created automatically — the user adds it manually in ~5 seconds. Once added it references live data and does not need to be recreated on subsequent runs.
 
 ### Dividend Gap-Fill
 After all sheets are written, if `ANTHROPIC_API_KEY` is set and `--no-dividend-fill` is not passed, `fill_dividends` calls the Claude API (claude-sonnet-4-20250514 with web_search tool) to look up dividend data for equity positions and writes results back to Numbers.
