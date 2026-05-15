@@ -1168,6 +1168,39 @@ def build_sheet(doc: str, sheet_name: str, positions: list,
 
 # ── Summary Sheet ──────────────────────────────────────────────────────────────
 
+def find_totals_row(doc: str, sheet_name: str) -> int:
+    """Return the 1-based row number of the totals row in sheet_name's 'My Portfolio' table.
+
+    Reads column A until it finds a cell whose value starts with 'Portfolio'.
+    Returns 0 if the sheet or table is not found or no matching row exists.
+    """
+    result = run_jxa_file(f'''(function() {{
+  var app = Application("Numbers");
+  var sheets = app.documents[{json.dumps(doc)}].sheets;
+  var sheet = null;
+  for (var i = 0; i < sheets.length; i++) {{
+    if (sheets[i].name() === {json.dumps(sheet_name)}) {{ sheet = sheets[i]; break; }}
+  }}
+  if (!sheet) return "0";
+  var tables = sheet.tables;
+  var tbl = null;
+  for (var j = 0; j < tables.length; j++) {{
+    if (tables[j].name() === "My Portfolio") {{ tbl = tables[j]; break; }}
+  }}
+  if (!tbl) return "0";
+  var n = tbl.rowCount();
+  for (var r = 1; r <= n; r++) {{
+    var v = tbl.rows[r - 1].cells[0].value();
+    if (v !== null && String(v).indexOf("Portfolio") === 0) return String(r);
+  }}
+  return "0";
+}})()''')
+    try:
+        return int(result)
+    except (ValueError, TypeError):
+        return 0
+
+
 def build_summary_sheet(doc: str, tot_rows: dict, col_map: dict):
     """Create a Summary sheet positioned first, with cross-sheet refs to each portfolio sheet.
 
@@ -1181,6 +1214,15 @@ def build_summary_sheet(doc: str, tot_rows: dict, col_map: dict):
     cb_col = col_letter(col_map.get("Cost Basis",   10))   # J
 
     print(f"\n  Building sheet '{SHEET}'...")
+
+    # ── 0. Delete any existing Summary sheet so re-runs replace it cleanly ──
+    run_applescript_file(f'''tell application "Numbers"
+  tell document {_as_str(doc)}
+    if (name of sheets) contains {_as_str(SHEET)} then
+      delete sheet {_as_str(SHEET)}
+    end if
+  end tell
+end tell''')
 
     # ── 1. Add sheet at position 1 ──
     # Use `at beginning` in the make command rather than a separate `move` call.
@@ -1426,9 +1468,13 @@ end tell'''
 
 def main():
     parser = argparse.ArgumentParser(description="Build Numbers portfolio from Fidelity CSV")
-    parser.add_argument("csv_file")
+    parser.add_argument("csv_file", nargs="?",
+                        help="Fidelity positions CSV (required unless --summary-only is used)")
     parser.add_argument("--template", default="Portfolio Template.numbers")
     parser.add_argument("--doc-name")
+    parser.add_argument("--summary-only", action="store_true",
+                        help="Rebuild the Summary sheet on an already-open document; "
+                             "--doc-name is required")
     parser.add_argument("--output-dir", default=DESKTOP_DIR,
                         help=f"Directory to save the output .numbers file (default: ~/Desktop)")
     parser.add_argument("--brokerage-only", action="store_true",
@@ -1444,6 +1490,27 @@ def main():
     parser.add_argument("--no-dividend-fill", action="store_true",
                         help="Skip the Claude API dividend gap-fill step")
     args = parser.parse_args()
+
+    # ── --summary-only: rebuild Summary sheet on an already-open document ──
+    if args.summary_only:
+        if not args.doc_name:
+            parser.error("--summary-only requires --doc-name (the document must already be open in Numbers)")
+        doc_name = args.doc_name
+        print(f"--summary-only: rebuilding Summary sheet in '{doc_name}'...")
+        SHEET_NAMES = ["Portfolio", "Portfolio-Cash", "Portfolio-IRA", "Portfolio-ROTH"]
+        tot_rows: dict = {}
+        for sn in SHEET_NAMES:
+            row = find_totals_row(doc_name, sn)
+            if row:
+                tot_rows[sn] = row
+                print(f"  {sn}: totals row {row}")
+            else:
+                print(f"  {sn}: not found (skipped)")
+        build_summary_sheet(doc_name, tot_rows, {})
+        return
+
+    if not args.csv_file:
+        parser.error("csv_file is required (or use --summary-only to rebuild the Summary sheet only)")
 
     doc_name      = args.doc_name or derive_doc_name(args.csv_file)
     month_headers = derive_month_headers(args.csv_file)

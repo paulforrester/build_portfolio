@@ -20,7 +20,12 @@ python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --ira-only
 python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --roth-only
 python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --dry-run
 python3 build_portfolio.py Portfolio_Positions_May-08-2026.csv --no-dividend-fill
+
+# Rebuild only the Summary sheet on an already-open document (no CSV needed):
+python3 build_portfolio.py --summary-only --doc-name "Portfolio May 2026 (6)"
 ```
+
+When `--summary-only` is used: `csv_file` is not required. The document must already be open in Numbers. `find_totals_row()` reads each sheet to discover the totals row, then calls `build_summary_sheet()` directly. Pass `--doc-name` with the exact document name as Numbers shows it (including any ` (2)` suffix).
 
 The script requires:
 1. Apple Numbers installed and accessible via `osascript`
@@ -183,7 +188,11 @@ T-Bills are detected by: symbol matching `^\d{9}[A-Z]\d$` or description contain
 ### Summary Sheet
 After all four portfolio sheets are built and unused templates are deleted, `build_summary_sheet(doc, tot_rows, col_map)` creates a **Summary** sheet positioned first in the document (before Portfolio).
 
+`build_summary_sheet` deletes any pre-existing "Summary" sheet at the start of every call, so re-running the script on an existing document replaces it cleanly rather than creating a duplicate.
+
 `tot_rows` is a dict of `{sheet_name: totals_row_number}` containing only sheets that were actually built. `build_sheet()` returns its totals row number; `main()` captures these and passes them through.
+
+`find_totals_row(doc, sheet_name)` discovers the totals row dynamically by reading column A of the `My Portfolio` table on the named sheet until it finds a cell whose value starts with `"Portfolio"`. Returns the 1-based row number, or `0` if the sheet/table is not found. Used by `--summary-only` so totals rows don't need to be recomputed by running the full build.
 
 The Summary sheet contains a table named **Portfolio Summary** (9 rows × 6 columns):
 
