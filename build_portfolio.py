@@ -1276,15 +1276,15 @@ try {{ tbl.columns[5].width = 80; }} catch(e) {{}}
         tot = tot_rows.get(sheet_name)
         if tot is not None:
             # Single-quote sheet names so hyphens in names are handled correctly by Numbers
-            mv_ref = f"='{sheet_name}'::My Portfolio::{mv_col}{tot}"
-            cb_ref = f"='{sheet_name}'::My Portfolio::{cb_col}{tot}"
+            mv_ref = f"=ROUND('{sheet_name}'::My Portfolio::{mv_col}{tot},2)"
+            cb_ref = f"=ROUND('{sheet_name}'::My Portfolio::{cb_col}{tot},2)"
             row = [
                 label,
                 mv_ref,
                 cb_ref,
-                f"=B{r}-C{r}",
-                f'=IFERROR(D{r}/C{r},"–")',
-                f'=IFERROR(B{r}/B$7,"–")',   # B$7 = Total MV (row 7)
+                f"=ROUND(B{r}-C{r},2)",
+                f'=IFERROR(ROUND(D{r}/C{r},4),"–")',
+                f'=IFERROR(ROUND(B{r}/B$7,4),"–")',   # B$7 = Total MV (row 7)
             ]
         else:
             row = [label, "", "", "", "", ""]
@@ -1294,45 +1294,35 @@ try {{ tbl.columns[5].width = 80; }} catch(e) {{}}
     # ── 5. Totals row (row 7; row 6 is a blank visual separator) ──
     _write_single_row_as(doc, SHEET, TABLE, 7, [
         "Total",
-        "=SUM(B2:B5)",
-        "=SUM(C2:C5)",
-        "=SUM(D2:D5)",
-        '=IFERROR(D7/C7,"–")',
-        "=1",   # always 100 %
+        "=ROUND(SUM(B2:B5),2)",
+        "=ROUND(SUM(C2:C5),2)",
+        "=ROUND(SUM(D2:D5),2)",
+        '=IFERROR(ROUND(D7/C7,4),"–")',
+        "=1",   # always 100%
     ])
 
-    # ── 6 & 7. Formatting + instruction cell — one batched AppleScript call ──
-    # Rules that avoid error -2740:
-    #   • bold:        tell cell C / set font bold to true / end tell
-    #   • number fmt:  set format of cell C of row R to number format "…"
-    #   • instruction: set value only — italic/color attempts cause -2740, so omit them
+    # ── 6 & 7. Formatting + instruction cell ──
+    # Use simple `set format of cell to currency / percent` — these keywords
+    # work without -2740 errors. Decimal places are controlled by ROUND() in
+    # the formulas above (2dp for currency, 4dp stored = 2dp displayed as %).
     try:
         run_applescript_file(f'''tell application "Numbers"
   tell document {_as_str(doc)}
     tell sheet {_as_str(SHEET)}
       tell table {_as_str(TABLE)}
-        tell row 1
-          repeat with c from 1 to 6
-            tell cell c
-              set font bold to true
-            end tell
-          end repeat
-        end tell
-        tell row 7
-          repeat with c from 1 to 6
-            tell cell c
-              set font bold to true
-            end tell
-          end repeat
-        end tell
+        -- Currency format for cols B, C, D (rows 2-7)
         repeat with r from 2 to 7
-          set format of cell 2 of row r to number format "$#,##0.00"
-          set format of cell 3 of row r to number format "$#,##0.00"
-          set format of cell 4 of row r to number format "$#,##0.00"
-          set format of cell 5 of row r to number format "0.00%"
-          set format of cell 6 of row r to number format "0.00%"
+          set format of cell 2 of row r to currency
+          set format of cell 3 of row r to currency
+          set format of cell 4 of row r to currency
         end repeat
-        set value of cell 1 of row 9 to "To add pie chart: select A1:B5 -> Insert -> Chart -> Pie"
+        -- Percent format for cols E, F (rows 2-7)
+        repeat with r from 2 to 7
+          set format of cell 5 of row r to percent
+          set format of cell 6 of row r to percent
+        end repeat
+        -- Instruction cell
+        set value of cell 1 of row 9 to "To add pie chart: select A1:B5 \u2192 Insert \u2192 Chart \u2192 Pie"
       end tell
     end tell
   end tell

@@ -186,35 +186,55 @@ T-Bills are detected by: symbol matching `^\d{9}[A-Z]\d$` or description contain
 - Market Value (col K): `=IFERROR(D{r}*(G{r}/100),"–")` — T-Bills are quoted per $100 face value
 
 ### Summary Sheet
-After all four portfolio sheets are built and unused templates are deleted, `build_summary_sheet(doc, tot_rows, col_map)` creates a **Summary** sheet positioned first in the document (before Portfolio).
 
-`build_summary_sheet` deletes any pre-existing "Summary" sheet at the start of every call, so re-running the script on an existing document replaces it cleanly rather than creating a duplicate.
+After all four portfolio sheets are built, `build_summary_sheet()` creates a `Summary`
+sheet positioned first in the document. It contains a `Portfolio Summary` table with
+cross-sheet formula references to the totals row of each portfolio sheet and an
+instruction cell prompting the user to add a pie chart manually.
 
-`tot_rows` is a dict of `{sheet_name: totals_row_number}` containing only sheets that were actually built. `build_sheet()` returns its totals row number; `main()` captures these and passes them through.
+**The totals row number** for each sheet is returned by `build_sheet()` and passed to
+`build_summary_sheet()` as `tot_rows: dict`. When running `--summary-only`,
+`find_totals_row()` discovers these dynamically by reading down column A until it finds
+a cell containing `"Portfolio"`.
 
-`find_totals_row(doc, sheet_name)` discovers the totals row dynamically by reading column A of the `My Portfolio` table on the named sheet until it finds a cell whose value starts with `"Portfolio"`. Returns the 1-based row number, or `0` if the sheet/table is not found. Used by `--summary-only` so totals rows don't need to be recomputed by running the full build.
+**Cross-sheet formula syntax:** `='SheetName'::My Portfolio::K31` — single-quoted sheet
+names handle hyphens correctly (e.g. `'Portfolio-Cash'`).
 
-The Summary sheet contains a table named **Portfolio Summary** (9 rows × 6 columns):
+**ROUND() in formulas:** All formula values are wrapped in `ROUND()` to avoid
+floating-point precision noise — `ROUND(..., 2)` for currency cells, `ROUND(..., 4)`
+for percentage cells (4 stored decimal places display as 2 when formatted as percent).
 
-| Row | Col A | Col B | Col C | Col D | Col E | Col F |
-|-----|-------|-------|-------|-------|-------|-------|
-| 1 | (header) | Market Value | Cost Basis | Gain / Loss | % Gain | % of Total |
-| 2 | Brokerage | `='Portfolio'::My Portfolio::K{tot}` | `=...::J{tot}` | `=B2-C2` | `=IFERROR(D2/C2,"–")` | `=IFERROR(B2/B$7,"–")` |
-| 3 | Cash & T-Bills | `='Portfolio-Cash'::...` | … | … | … | … |
-| 4 | IRA / 401k | `='Portfolio-IRA'::...` | … | … | … | … |
-| 5 | ROTH | `='Portfolio-ROTH'::...` | … | … | … | … |
-| 6 | (blank separator) | | | | | |
-| 7 | Total | `=SUM(B2:B5)` | `=SUM(C2:C5)` | `=SUM(D2:D5)` | `=IFERROR(D7/C7,"–")` | `=1` |
-| 8 | (spare) | | | | | |
-| 9 | (pie chart instruction — italic, amber text) | | | | | |
+**Formatting — critical constraints discovered through testing:**
 
-Cross-sheet formula syntax: `='SheetName'::My Portfolio::K{row}` — sheet names are single-quoted to handle hyphens. If a sheet was not built (partial run), its row is written with empty cells.
+Numbers AppleScript has severe limitations on cell formatting. These are the only
+patterns that work without `-2740` errors:
 
-`% of Total` (col F) references `B$7` (total MV row 7) so proportions are always live: `=IFERROR(B{r}/B$7,"–")`.
+```applescript
+-- ✓ WORKS: format type keywords (no decimal control)
+set format of cell 2 of row r to currency
+set format of cell 5 of row r to percent   -- NOTE: "percent" not "percentage"
 
-**Formatting**: header row (row 1) and totals row (row 7) are bold; cols B–D (rows 2–7) use `set number format to "$#,##0.00"`; cols E–F use `set number format to "0.00%"`; col A widths 160pt, cols B–D 120pt, cols E–F 80pt. Note: `set format of cell N of row R to currency/percentage` causes AppleScript error -2740 because those bare keywords are reserved — always use the `tell cell … set number format to "…"` pattern instead.
+-- ✗ FAILS with -2740: custom format strings
+set format of cell 2 of row r to number format "$#,##0.00"
 
-**Pie chart**: `make new chart` via AppleScript is unreliable in Numbers and GUI scripting requires Accessibility permissions that may not be granted. Instead, the script writes an italic amber-colored instruction string to cell A9 (`"To add pie chart: select A1:B5 → Insert → Chart → Pie"`) and prints the same instruction to stdout at the end of the run. The chart is not created automatically — the user adds it manually in ~5 seconds. Once added it references live data and does not need to be recreated on subsequent runs.
+-- ✗ FAILS with -2740: font bold in any form
+set font bold of cell c of row 1 to true
+tell cell c / set font bold to true / end tell
+```
+
+**Do not attempt** to set decimal places, custom format strings, or bold formatting
+via AppleScript in `build_summary_sheet()` — all known approaches generate `-2740`
+errors. The `ROUND()` formulas compensate for the lack of decimal place control.
+Bold formatting on the header and totals rows is not applied programmatically.
+
+**Pie chart:** Cannot be created programmatically — Numbers does not expose chart
+creation reliably via AppleScript or JXA. An instruction cell in row 9 prompts the
+user to create it manually (select A1:B5 → Insert → Chart → Pie). This is a one-time
+step per document since the chart references live data afterward.
+
+**Formatting is wrapped in try/except** — if the formatting block fails for any reason,
+a WARNING is printed and the script continues. The data itself is always written
+correctly regardless of formatting success.
 
 ### Dividend Gap-Fill
 After all sheets are written, if `ANTHROPIC_API_KEY` is set and `--no-dividend-fill` is not passed, `fill_dividends` calls the Claude API (claude-sonnet-4-20250514 with web_search tool) to look up dividend data for equity positions and writes results back to Numbers.
