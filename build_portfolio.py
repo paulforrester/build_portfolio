@@ -242,7 +242,7 @@ for (var c = 0; c < colCount; c++) {{
   try {{ w = table.columns[c].width(); }} catch(e) {{}}
   widths.push(w);
 }}
-JSON.stringify({{ docName: doc.name(), colCount: colCount, headers: headers, formulas: formulas, widths: widths }});
+JSON.stringify({{ docName: doc.name(), colCount: colCount, headers: headers, formulas: formulas, widths: widths, footerRowCount: table.footerRowCount() }});
 '''
     try:
         out = run_jxa_file(jxa)
@@ -252,6 +252,7 @@ JSON.stringify({{ docName: doc.name(), colCount: colCount, headers: headers, for
     data = json.loads(out)
     num_cols = data["colCount"]
     template_doc_name = data["docName"]
+    footer_row_count = int(data.get("footerRowCount", 0))
 
     def pad(lst):
         lst = [str(v) if v is not None else "" for v in lst]
@@ -270,7 +271,7 @@ JSON.stringify({{ docName: doc.name(), colCount: colCount, headers: headers, for
     formula_row = [_resolve_named_refs(f, col_map) for f in formula_row]
     _validate_formula_refs(formula_row, col_map)
 
-    return template_doc_name, col_map, headers, formula_row, num_cols, col_widths
+    return template_doc_name, col_map, headers, formula_row, num_cols, col_widths, footer_row_count
 
 
 # ── Basis Override Reader ──────────────────────────────────────────────────────
@@ -1086,18 +1087,22 @@ def build_sheet(doc: str, sheet_name: str, positions: list,
                 col_map_orig: dict, headers_orig: list, formula_row_orig: list,
                 num_cols: int, col_widths: list, month_headers: list,
                 is_ira: bool = False, has_tax_rows: bool = None,
-                template_sheet: str = "_template1") -> int:
+                template_sheet: str = "_template1",
+                footer_row_count: int = 0) -> int:
     """Populate a Numbers sheet by writing into the pre-formatted template_sheet,
     then renaming it to sheet_name.
 
-    Returns tot_row (the totals row index).
+    Returns tot_row (the totals row index, which is the footer row when footer_row_count > 0).
     """
     TABLE = "My Portfolio"
     n = len(positions)
-    last_data = n + 1
-    tot_row   = n + 2
-    extra     = 5 if not is_ira else 3
-    total_rows = 1 + n + extra
+    last_data  = n + 1
+    write_tax  = (not is_ira) if has_tax_rows is None else has_tax_rows
+    # Body rows after data: empty separator + tax row for sheets with tax rows.
+    extra_body = 2 if write_tax else 0
+    # Footer row sits after all body rows; tot_row is the 1-based footer row number.
+    total_rows = 1 + n + extra_body + footer_row_count
+    tot_row    = total_rows
 
     col_map    = dict(col_map_orig)
     headers    = list(headers_orig)
@@ -1112,7 +1117,9 @@ def build_sheet(doc: str, sheet_name: str, positions: list,
     print(f"\n  Building sheet '{sheet_name}' ({n} positions) from {template_sheet}...")
 
     resize_table_as(doc, template_sheet, TABLE, total_rows)
-    clear_data_rows_as(doc, template_sheet, TABLE, num_cols, 2, total_rows)
+    # Clear only body rows — leave the footer row intact so its pre-built template
+    # formulas (=SUM(Shares), =SUM(Market Value), etc.) survive the resize.
+    clear_data_rows_as(doc, template_sheet, TABLE, num_cols, 2, 1 + n + extra_body)
 
     # ── Header row with month-name overrides ──
     header_row = list(headers)
@@ -1147,7 +1154,11 @@ def build_sheet(doc: str, sheet_name: str, positions: list,
     print(f"    Writing {n} data rows (batch)...")
     _write_rows_as_batch(doc, template_sheet, TABLE, 2, data_rows)
 
-    # ── Totals row ──
+    # ── Footer / totals row ──
+    # The template's footer row already carries =SUM(Shares), =SUM(Market Value), etc.
+    # We overlay the sheet label and computed formulas (% Gain, Div %, etc.) that
+    # reference specific cell addresses.  Columns not touched here keep their
+    # template formulas, which auto-adjust for any number of body rows.
     totals = _build_fallback_totals(col_map, num_cols, last_data, tot_row, month_headers)
     label = sheet_name
     a_idx = col_map.get("idx", 1)
@@ -1157,10 +1168,9 @@ def build_sheet(doc: str, sheet_name: str, positions: list,
         totals[pct_idx - 1] = 1.0
     _write_single_row_as(doc, template_sheet, TABLE, tot_row, totals)
 
-    # ── Tax rows (Portfolio only; not Portfolio-Cash, not IRA/ROTH sheets) ──
-    write_tax = (not is_ira) if has_tax_rows is None else has_tax_rows
+    # ── Tax row (Portfolio only) — written to the body row immediately before the footer ──
     if write_tax:
-        _write_tax_rows_as(doc, template_sheet, TABLE, tot_row + 2)
+        _write_tax_rows_as(doc, template_sheet, TABLE, tot_row - 1)
 
     rename_sheet_as(doc, template_sheet, sheet_name)
     print(f"  ✓ Sheet '{sheet_name}' complete.")
@@ -1525,7 +1535,7 @@ def main():
 
     if not args.dry_run:
         print(f"Reading template '{args.template}'...")
-        _tmpl_doc_name, col_map, headers, formula_row, num_cols, col_widths = read_template(args.template)
+        _tmpl_doc_name, col_map, headers, formula_row, num_cols, col_widths, footer_row_count = read_template(args.template)
         template_path = _resolve_template_path(args.template)
         print(f"  Template: '{template_path}'")
         print(f"  {num_cols} columns, {len(col_map)} named headers")
@@ -1630,7 +1640,8 @@ def main():
                     actual_doc, "Portfolio", brok_equity,
                     col_map, list(headers), list(formula_row),
                     num_cols, col_widths, month_headers,
-                    is_ira=False, has_tax_rows=True, template_sheet=tmpl)
+                    is_ira=False, has_tax_rows=True, template_sheet=tmpl,
+                    footer_row_count=footer_row_count)
         summary["Portfolio"] = {
             "positions":    len(brok_equity),
             "market_value": sum(p["current_value"] for p in brok_equity),
@@ -1644,7 +1655,8 @@ def main():
                     actual_doc, "Portfolio-Cash", brok_cash_ordered,
                     col_map, list(headers), list(formula_row),
                     num_cols, col_widths, month_headers,
-                    is_ira=False, has_tax_rows=False, template_sheet=tmpl)
+                    is_ira=False, has_tax_rows=False, template_sheet=tmpl,
+                    footer_row_count=footer_row_count)
         summary["Portfolio-Cash"] = {
             "positions":    len(brok_cash_ordered),
             "market_value": sum(p["current_value"] for p in brok_cash_ordered),
@@ -1659,7 +1671,8 @@ def main():
                     actual_doc, "Portfolio-IRA", ira,
                     col_map, list(headers), list(formula_row),
                     num_cols, col_widths, month_headers,
-                    is_ira=True, template_sheet=tmpl)
+                    is_ira=True, template_sheet=tmpl,
+                    footer_row_count=footer_row_count)
         summary["Portfolio-IRA"] = {
             "positions":    len(ira),
             "market_value": sum(p["current_value"] for p in ira),
@@ -1674,7 +1687,8 @@ def main():
                     actual_doc, "Portfolio-ROTH", roth,
                     col_map, list(headers), list(formula_row),
                     num_cols, col_widths, month_headers,
-                    is_ira=True, template_sheet=tmpl)
+                    is_ira=True, template_sheet=tmpl,
+                    footer_row_count=footer_row_count)
         summary["Portfolio-ROTH"] = {
             "positions":    len(roth),
             "market_value": sum(p["current_value"] for p in roth),

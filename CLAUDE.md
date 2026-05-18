@@ -73,15 +73,24 @@ Two osascript calls per sheet for all data rows:
 1. **Static values**: one batched script with `set value of cell {col} of row {r} to {value}` for every non-empty, non-formula cell. Numbers rejects mixed-type 2D lists, so `set value of range` and `set value of cells of row N to {list}` cannot be used.
 2. **Formulas**: one batched script with `set value of cell {col} of row {r} to "=formula"` for every formula cell. Numbers parses strings beginning with `=` as formulas; `set formula of cell` is unreliable in this context.
 
-Total: ~7 `osascript` calls per sheet (resize, clear, header row, batch statics, batch formulas, totals row, tax rows; IRA sheets skip tax rows).
+Total: ~7 `osascript` calls per sheet (resize, clear body rows, header row, batch statics, batch formulas, footer/totals row, tax row; IRA sheets skip tax row).
+
+### Template Structure — 3 rows
+Each `_templateN` sheet has exactly 3 rows:
+- **Row 1**: Header row (column names)
+- **Row 2**: Data template row — formulas here are copied to every data position row
+- **Row 3**: Footer row (Numbers table footer) — pre-built aggregate formulas (`=SUM(Shares)`, `=SUM(Market Value)`, etc.) that auto-sum all body rows
+
+`read_template` reads `footerRowCount` from the template JXA and returns it so `build_sheet` can place the totals in the actual Numbers footer row.
 
 ### Operation Order in `build_sheet`
-1. `resize_table_as` + `clear_data_rows_as` (JXA) — prepare the pre-formatted `_templateN` sheet
-2. `_write_single_row_as` — header row with month-name overrides
-3. `_write_rows_as_batch` — all data rows (static pass + formula pass)
-4. `_write_single_row_as` — totals row
-5. `_write_tax_rows_as` — Portfolio only; writes rates as pre-formatted strings ("16.44%") because Numbers `set format … to percentage` is unreliable in this context
-6. `rename_sheet_as` — renames `_templateN` to the final sheet name
+1. `resize_table_as` (JXA) — sets total row count = 1 header + n data rows + extra body rows + footer rows
+2. `clear_data_rows_as` (JXA) — clears ONLY body rows (rows 2 to `total_rows − footer_row_count`); footer row is left intact so its template `=SUM(...)` formulas survive
+3. `_write_single_row_as` — header row with month-name overrides
+4. `_write_rows_as_batch` — all data rows (static pass + formula pass)
+5. `_write_single_row_as` — writes sheet label and computed formulas (% Gain, Div %, etc.) into the **footer row** (`tot_row = total_rows`); simple column-sum cells keep their template formulas
+6. `_write_tax_rows_as` — Portfolio only; writes to `tot_row − 1` (the body row immediately before the footer); rates written as pre-formatted strings ("16.44%") because Numbers `set format … to percentage` is unreliable
+7. `rename_sheet_as` — renames `_templateN` to the final sheet name
 7. `spot_check_sheet` — reads back key cells via JXA and prints row 2, totals, and T-Bill MV sanity check
 8. Returns `tot_row` (the 1-based totals row index) — captured by `main()` and passed to `build_summary_sheet()`
 
