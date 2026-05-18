@@ -1640,7 +1640,7 @@ def main():
                     actual_doc, "Portfolio", brok_equity,
                     col_map, list(headers), list(formula_row),
                     num_cols, col_widths, month_headers,
-                    is_ira=False, has_tax_rows=True, template_sheet=tmpl,
+                    is_ira=False, has_tax_rows=False, template_sheet=tmpl,
                     footer_row_count=footer_row_count)
         summary["Portfolio"] = {
             "positions":    len(brok_equity),
