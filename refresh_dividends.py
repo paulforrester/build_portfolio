@@ -21,6 +21,8 @@ Dependencies:
 """
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import re
@@ -42,6 +44,14 @@ try:
     _YF_AVAILABLE = True
 except ImportError:
     _YF_AVAILABLE = False
+
+
+@contextlib.contextmanager
+def _suppress_yf():
+    """Suppress stdout/stderr during yfinance property access (HTTP error prints)."""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        yield
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -478,9 +488,10 @@ def wait_for_token_budget(ticker: str):
         time.sleep(ms_to_wait)
 
 
-# ── Alpha Vantage throttle ─────────────────────────────────────────────────────
+# ── Alpha Vantage throttle / exhaustion ───────────────────────────────────────
 
-_av_last_call: float = 0.0
+_av_last_call:  float = 0.0
+_av_exhausted:  bool  = False   # set True on first quota hit; cleared in main()
 
 
 def _av_throttle(label: str):
@@ -495,7 +506,8 @@ def _av_throttle(label: str):
 # ── Source 1: Alpha Vantage ────────────────────────────────────────────────────
 
 def fetch_from_alpha_vantage(ticker: str, av_key: str) -> Optional[dict]:
-    if not av_key:
+    global _av_exhausted
+    if not av_key or _av_exhausted:
         return None
     try:
         _av_throttle(ticker)
@@ -507,7 +519,8 @@ def fetch_from_alpha_vantage(ticker: str, av_key: str) -> Optional[dict]:
         o = resp.json()
         if not o.get("Symbol") or o.get("Note") or o.get("Information"):
             if o.get("Note") or o.get("Information"):
-                print(f"  {ticker} [AV]: quota/rate limit hit")
+                print(f"  {ticker} [AV]: quota/rate limit hit — skipping AV for remainder of run")
+                _av_exhausted = True
             return None
 
         ann_div = (
@@ -615,8 +628,11 @@ def fetch_from_yahoo(ticker: str) -> Optional[dict]:
     if not _YF_AVAILABLE:
         return None
     try:
-        t    = yf.Ticker(ticker)
-        info = t.info or {}
+        t = yf.Ticker(ticker)
+
+        # Suppress yfinance's HTTP error prints (e.g. 404 "No fundamentals data")
+        with _suppress_yf():
+            info = t.info or {}
 
         # Forward annual div rate; fall back to trailing if not available
         ann_div = (info.get("dividendRate")
@@ -627,7 +643,8 @@ def fetch_from_yahoo(ticker: str) -> Optional[dict]:
         ex_div   = None
         pay_date = None
         try:
-            cal      = t.calendar or {}
+            with _suppress_yf():
+                cal  = t.calendar or {}
             ex_d     = cal.get("Ex-Dividend Date")
             pay_d    = cal.get("Dividend Date")
             ex_div   = str(ex_d)  if ex_d  else None
@@ -640,10 +657,18 @@ def fetch_from_yahoo(ticker: str) -> Optional[dict]:
             ex_ts  = info.get("exDividendDate")
             ex_div = norm_date(ex_ts) if ex_ts else None
 
+        # Sanitize absurdly old pay dates (Yahoo sometimes returns corrupt history dates).
+        # Any pay date older than ~400 days is clearly stale data, not an upcoming payment.
+        if pay_date:
+            stale_cutoff = (date.today() - timedelta(days=400)).isoformat()
+            if pay_date < stale_cutoff:
+                pay_date = None
+
         # Infer frequency from dividend history; also compute annual if still missing
         freq = 4
         try:
-            divs = t.dividends
+            with _suppress_yf():
+                divs = t.dividends
             if len(divs) >= 2:
                 last_amt = float(divs.iloc[-1])
                 if ann_div:
@@ -862,7 +887,7 @@ def _write_pos(pos: dict, doc_name: str, months: list, sym: str):
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
-    global _token_log, _recent_tokens, _token_estimate
+    global _token_log, _recent_tokens, _token_estimate, _av_exhausted, _av_last_call
 
     parser = argparse.ArgumentParser(
         description="Refresh dividend data in Apple Numbers portfolio document")
@@ -880,10 +905,12 @@ def main():
 
     config = load_config()
 
-    # Reset token state per run (mirrors HTML tokenEstimate = 1300 reset)
+    # Reset per-run state
     _token_log.clear()
     _recent_tokens.clear()
     _token_estimate = 1300.0
+    _av_exhausted   = False
+    _av_last_call   = 0.0
 
     doc_name = args.doc
     # Numbers stores document names with the .numbers extension internally
@@ -1022,8 +1049,12 @@ def main():
                     continue
                 sort_sheet(doc_name, sheet, cm["PAY_DATE"] + 1)
                 print(f"  {sheet}: sorted ✓")
-            except Exception as e:
-                print(f"  {sheet}: sort error — {e}")
+            except RuntimeError as e:
+                err = str(e)
+                if "-10000" in err or "cannot be sorted" in err:
+                    print(f"  {sheet}: no date values to sort — skipping")
+                else:
+                    print(f"  {sheet}: sort error — {e}")
 
     print(f"\nDone — {stats['updated']} updated, {stats['skipped']} skipped, {stats['errors']} errors")
 
