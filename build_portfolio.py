@@ -625,6 +625,8 @@ def _resolve_named_refs(formula: str, col_map: dict) -> str:
 
     Numbers stores formulas using header-name refs where the suffix is either an internal
     table ID (digits) or the row's symbol/value (e.g. QQQM). Use \\w+ to match both.
+    Headers with spaces or special characters are wrapped in single quotes by Numbers
+    (e.g. 'Ann Div / sh' 16). Both quoted and unquoted forms are handled.
     """
     if not formula or not formula.startswith("="):
         return formula
@@ -633,7 +635,9 @@ def _resolve_named_refs(formula: str, col_map: dict) -> str:
     result = formula
     for header in headers_sorted:
         letter = header_to_letter[header]
-        result = re.sub(re.escape(header) + r"\s+\w+", letter + "2", result)
+        # Match both quoted ('Header Name' N) and unquoted (Header N) forms
+        pattern = r"'?" + re.escape(header) + r"'?\s+\w+"
+        result = re.sub(pattern, letter + "2", result)
     result = result.replace("×", "*").replace("−", "-").replace("÷", "/")
     return result
 
@@ -641,15 +645,15 @@ def _resolve_named_refs(formula: str, col_map: dict) -> str:
 def _validate_formula_refs(formula_row: list, col_map: dict):
     """Raise if any formula still contains named references after resolution.
 
-    Named refs look like 'Shares QQQM' (header + symbol). If they persist after
-    _resolve_named_refs, row 2 of the template has live data that caused Numbers to
-    convert column-letter refs into named refs during formula evaluation.
+    Named refs look like 'Shares QQQM' or 'Ann Div / sh' ENB (header + row id/symbol).
+    If they persist after _resolve_named_refs, row 2 of the template has live data that
+    caused Numbers to convert column-letter refs into named refs during formula evaluation.
     """
     for f in formula_row:
         if not f or not f.startswith("="):
             continue
         for header in col_map:
-            if header and re.search(re.escape(header) + r"\s+\w", f):
+            if header and re.search(r"'?" + re.escape(header) + r"'?\s+\w", f):
                 sys.exit(
                     f"ERROR: Template formula patterns still contain named references "
                     f"(e.g. \"{header} ...\"). Row 2 of each _templateN sheet in the "
