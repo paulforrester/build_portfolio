@@ -257,6 +257,10 @@ tracking documents. It communicates with Numbers via **NumBridge** (a local MCP
 server at `http://127.0.0.1:8765/mcp`) rather than directly via AppleScript, because
 browsers cannot call `osascript`. NumBridge must be running before opening the file.
 
+**Prefer `refresh_dividends.py` for command-line use.** The HTML tool is retained as
+a browser-based alternative and for reference — its cascade logic is the canonical
+source of truth that `refresh_dividends.py` replicates.
+
 Open the file directly in a browser (`file://...`) — no local server needed.
 
 ### What It Does
@@ -297,7 +301,8 @@ all rows across all sheets that hold that symbol — so shared tickers like VTI,
 QQQM, and VOO are only looked up once regardless of how many sheets they appear on.
 
 T-Bills (CUSIP-format symbols) and money market funds (SPAXX, FZDXX, etc.) are
-excluded from fetching entirely.
+excluded from fetching entirely. `Portfolio-Cash` is excluded entirely — it contains
+only T-Bills, money markets, and cash instruments, none of which have dividends.
 
 ### NumBridge Dependency
 
@@ -396,3 +401,95 @@ string and date before saving. Current version: **v1.6.1 · 2026-05-14**.
   "current" dividend data
 - The `getPortfolioSheets` newline-split logic — depends on NumBridge returning
   newline-delimited sheet names; document this assumption if NumBridge changes
+
+---
+
+## refresh_dividends.py
+
+Python command-line equivalent of `dividend-refresher.html`. Runs natively on macOS
+via direct AppleScript (`osascript`) — no browser or NumBridge required. Uses the
+same four-source cascade (AV → FMP → Yahoo → Claude) and cross-sheet deduplication
+logic as the HTML tool. **Preferred over `dividend-refresher.html` for automated or
+scripted use.**
+
+### Running
+
+```bash
+# Basic — auto-selects open Numbers document with Portfolio sheets
+python3 refresh_dividends.py
+
+# Specify document explicitly
+python3 refresh_dividends.py --doc "Portfolio May 2026 (13).numbers"
+
+# Force refresh all tickers even if dates are current
+python3 refresh_dividends.py --force
+
+# Preview only — show what would be fetched/written without changes
+python3 refresh_dividends.py --preview
+
+# Skip Claude API fallback (faster, free-tier sources only)
+python3 refresh_dividends.py --no-claude
+
+# Recalculate monthly amounts only — no API fetching
+python3 refresh_dividends.py --amounts-only
+```
+
+### API Keys
+
+Keys are read in this priority order:
+1. Environment variables: `AV_KEY`, `FMP_KEY`, `ANTHROPIC_API_KEY`
+2. Config file: `~/.dividend_refresher/config.json`
+
+```json
+{
+  "av_key": "...",
+  "fmp_key": "...",
+  "anthropic_key": "..."
+}
+```
+
+### Numbers Access
+
+Uses `run_applescript_file()` and `run_jxa_file()` — same functions as
+`build_portfolio.py`. No NumBridge, no session management needed. AppleScript
+reads and writes cells directly.
+
+### Sheet Handling
+
+Processes all sheets starting with `"Portfolio"` **except `"Portfolio-Cash"`**.
+The `_basis` sheet is excluded automatically (doesn't start with "Portfolio").
+`Summary` is excluded automatically (doesn't start with "Portfolio").
+
+### Data Source Cascade
+
+Identical cascade to `dividend-refresher.html` — AV → FMP → Yahoo → Claude.
+`resultUsable()` definition must match the HTML exactly. See the HTML tool's
+Data Source Cascade section for the canonical description.
+
+### Cross-Sheet Deduplication
+
+Same as `dividend-refresher.html` — all sheets read first, grouped by symbol,
+each unique symbol fetched once, result applied to all rows across all sheets.
+
+### Rate Limiting
+
+- **Alpha Vantage**: 13-second `time.sleep()` between calls
+- **Claude API**: token-bucket rate limiter — same logic as `waitForTokenBudget()`
+  in the HTML tool
+- **FMP / Yahoo**: no throttling
+
+### Column Map
+
+Same column positions as `dividend-refresher.html`. Read dynamically via JXA
+from the header row of each sheet. 0-based indices; write calls use `colIdx + 1`.
+Monthly columns (4 after Divs/year) derived as `divsYearCol + 1` — dynamic
+`NOW()` headers return empty strings from JXA, so all 35 columns are read
+unconditionally.
+
+### What Must NOT Change Without Consulting Claude Desktop
+
+- Cascade order (AV → FMP → Yahoo → Claude)
+- `resultUsable()` logic — must match `dividend-refresher.html` exactly
+- Stale-date fallback behaviour (keep existing sheet dates if fetch returns stale)
+- Cross-sheet dedup logic
+- Monthly amount calculation including noon-UTC timezone fix

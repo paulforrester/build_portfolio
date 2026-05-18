@@ -1,0 +1,1380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dividend Refresher</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;1,400&family=DM+Serif+Display&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg:#0e0f11; --bg2:#161719; --bg3:#1e2023; --border:#2a2d32;
+    --text:#e8e9eb; --muted:#666c75; --accent:#c8f060; --blue:#60c8f0;
+    --danger:#f06060; --warn:#f0b860; --success:#60f0a0;
+    --mono:'IBM Plex Mono',monospace; --serif:'DM Serif Display',serif;
+  }
+  body { background:var(--bg); color:var(--text); font-family:var(--mono); font-size:13px; min-height:100vh; }
+  header { border-bottom:1px solid var(--border); padding:24px 40px 20px; display:flex; align-items:baseline; gap:16px; flex-wrap:wrap; }
+  header h1 { font-family:var(--serif); font-size:26px; font-weight:400; color:var(--accent); letter-spacing:-0.02em; }
+  header .sub { color:var(--muted); font-size:12px; }
+  header .server { margin-left:auto; color:var(--muted); font-size:11px; border:1px solid var(--border); padding:3px 10px; border-radius:4px; }
+  header .server .dot { color:var(--success); margin-right:5px; }
+  header .version { color:var(--border); font-size:10px; font-family:var(--mono); margin-left:8px; }
+  main { padding:28px 40px; max-width:1100px; }
+  #key-banner { background:var(--bg2); border:1px solid var(--border); border-left:3px solid var(--warn); border-radius:6px; padding:12px 16px; margin-bottom:24px; font-size:12px; color:var(--warn); }
+  #key-banner.hidden { display:none; }
+  #key-banner a { color:var(--blue); cursor:pointer; text-decoration:underline; }
+  .stats { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-bottom:24px; }
+  .stat { background:var(--bg2); border:1px solid var(--border); border-radius:6px; padding:12px 16px; }
+  .stat-label { font-size:10px; text-transform:uppercase; letter-spacing:0.08em; color:var(--muted); margin-bottom:5px; }
+  .stat-value { font-size:24px; color:var(--text); }
+  .stat-value.g { color:var(--success); } .stat-value.a { color:var(--warn); } .stat-value.r { color:var(--danger); }
+  #delay-bar { display:none; background:var(--bg2); border:1px solid var(--border); border-left:3px solid var(--warn); border-radius:6px; padding:10px 16px; margin-bottom:16px; font-size:12px; color:var(--warn); display:flex; align-items:center; gap:12px; }
+  #delay-bar.hidden { display:none !important; }
+  #delay-countdown { font-size:18px; font-weight:500; min-width:40px; }
+  .doc-row { display:flex; align-items:center; gap:10px; margin-bottom:14px; flex-wrap:wrap; padding:10px 14px; background:var(--bg2); border:1px solid var(--border); border-radius:6px; }
+  .doc-row label { font-size:10px; text-transform:uppercase; letter-spacing:0.08em; color:var(--muted); white-space:nowrap; }
+  .doc-select { font-family:var(--mono); font-size:12px; background:var(--bg3); border:1px solid var(--border); border-radius:4px; color:var(--text); padding:6px 10px; outline:none; min-width:280px; cursor:pointer; }
+  .doc-select:focus { border-color:var(--accent); }
+  .doc-select option { background:var(--bg3); }
+  .sheets-found { font-size:11px; color:var(--muted); margin-left:4px; }
+  .sheets-found .sheet-pill { display:inline-block; background:rgba(96,200,240,0.1); color:var(--blue); border:1px solid rgba(96,200,240,0.25); border-radius:3px; padding:1px 7px; font-size:10px; margin:0 2px; }
+  .controls { display:flex; align-items:center; gap:10px; margin-bottom:14px; flex-wrap:wrap; }
+  button { font-family:var(--mono); font-size:12px; cursor:pointer; border:none; border-radius:4px; padding:8px 18px; transition:opacity 0.15s,transform 0.1s; }
+  button:active { transform:scale(0.97); } button:disabled { opacity:0.3; cursor:not-allowed; }
+  .btn-p { background:var(--accent); color:#0e0f11; font-weight:500; } .btn-p:hover:not(:disabled) { opacity:0.85; }
+  .btn-s { background:var(--bg3); color:var(--text); border:1px solid var(--border); } .btn-s:hover:not(:disabled) { border-color:var(--muted); }
+  .btn-icon { padding:6px 10px; font-size:14px; }
+  #status-msg { margin-left:auto; font-size:12px; color:var(--muted); }
+  .prog-track { height:2px; background:var(--border); border-radius:2px; margin-bottom:22px; overflow:hidden; }
+  .prog-fill { height:100%; background:var(--accent); border-radius:2px; width:0%; transition:width 0.35s ease; }
+  .tbl-wrap { overflow-x:auto; }
+  table { width:100%; border-collapse:collapse; }
+  thead th { text-align:left; padding:7px 10px; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:0.08em; border-bottom:1px solid var(--border); white-space:nowrap; font-weight:400; }
+  tbody td { padding:9px 10px; border-bottom:1px solid var(--border); vertical-align:middle; }
+  tbody tr:last-child td { border-bottom:none; } tbody tr:hover td { background:var(--bg2); }
+  .sym { font-weight:500; }
+  .sheet-tag { display:inline-block; font-size:10px; padding:1px 6px; border-radius:3px; margin-left:5px; background:var(--bg3); color:var(--muted); border:1px solid var(--border); }
+  .sheet-tag.ira { background:rgba(96,200,240,0.08); color:var(--blue); border-color:rgba(96,200,240,0.2); }
+  .sheet-tag.brok { background:rgba(200,240,96,0.08); color:var(--accent); border-color:rgba(200,240,96,0.2); }
+  .freq { display:inline-block; font-size:10px; padding:1px 6px; border-radius:3px; margin-left:5px; background:var(--bg3); color:var(--muted); border:1px solid var(--border); }
+  .freq.mo { background:rgba(96,240,160,0.1); color:var(--success); border-color:rgba(96,240,160,0.3); }
+  .pill { display:inline-block; font-size:10px; padding:2px 7px; border-radius:3px; margin:1px 2px 1px 0; background:rgba(96,200,240,0.1); color:var(--blue); border:1px solid rgba(96,200,240,0.25); }
+  .pill.all { background:rgba(96,240,160,0.1); color:var(--success); border-color:rgba(96,240,160,0.3); }
+  .badge { display:inline-block; font-size:10px; padding:2px 8px; border-radius:3px; }
+  .b-pending { background:var(--bg3); color:var(--muted); }
+  .b-working { background:rgba(96,200,240,0.1); color:var(--blue); border:1px solid rgba(96,200,240,0.25); }
+  .b-updated { background:rgba(96,240,160,0.1); color:var(--success); border:1px solid rgba(96,240,160,0.3); }
+  .b-skipped { background:rgba(240,184,96,0.1); color:var(--warn); border:1px solid rgba(240,184,96,0.3); }
+  .b-error   { background:rgba(240,96,96,0.1); color:var(--danger); border:1px solid rgba(240,96,96,0.3); }
+  .b-current { background:rgba(96,240,160,0.05); color:var(--muted); border:1px solid var(--border); }
+  .empty { text-align:center; padding:44px 0; color:var(--muted); }
+  .empty .big { font-family:var(--serif); font-size:18px; color:var(--border); margin-bottom:6px; }
+  #log { display:none; margin-top:24px; background:var(--bg2); border:1px solid var(--border); border-radius:6px; padding:12px 14px; max-height:190px; overflow-y:auto; font-size:11px; line-height:1.75; }
+  .li { color:var(--muted); } .lok { color:var(--success); } .ler { color:var(--danger); } .lsec { color:var(--blue); margin-top:3px; } .lwarn { color:var(--warn); }
+  #overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.75); z-index:100; align-items:center; justify-content:center; }
+  #overlay.open { display:flex; }
+  #modal { background:var(--bg2); border:1px solid var(--border); border-radius:8px; padding:26px 30px; width:460px; max-width:92vw; }
+  #modal h2 { font-family:var(--serif); font-size:20px; font-weight:400; color:var(--accent); margin-bottom:18px; }
+  .flabel { font-size:10px; text-transform:uppercase; letter-spacing:0.08em; color:var(--muted); margin-bottom:5px; }
+  .finput { width:100%; background:var(--bg3); border:1px solid var(--border); border-radius:4px; color:var(--text); font-family:var(--mono); font-size:12px; padding:8px 11px; margin-bottom:16px; outline:none; }
+  .finput:focus { border-color:var(--accent); }
+  .mfoot { display:flex; gap:10px; justify-content:flex-end; margin-top:6px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Dividend Refresher</h1>
+  <span class="sub" id="header-sub">No document selected</span>
+  <span class="version">v1.6.1 · 2026-05-14</span>
+  <span class="server"><span class="dot">⬤</span>NumBridge 127.0.0.1:8765</span>
+</header>
+
+<main>
+  <div id="key-banner">
+    ⚠ API key not set. <a onclick="openSettings()">Open settings</a> to add your Anthropic API key.
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="stat-label">Tickers</div><div class="stat-value" id="s-total">—</div></div>
+    <div class="stat"><div class="stat-label">Updated</div><div class="stat-value g" id="s-updated">—</div></div>
+    <div class="stat"><div class="stat-label">Skipped</div><div class="stat-value a" id="s-skipped">—</div></div>
+    <div class="stat"><div class="stat-label">Errors</div><div class="stat-value r" id="s-errors">—</div></div>
+  </div>
+
+  <div id="delay-bar" class="hidden">
+    ⏳ Rate limited — next request in <span id="delay-countdown">—</span>s
+    &nbsp;·&nbsp; interval now <span id="delay-current">—</span>s
+  </div>
+
+  <!-- Document picker row -->
+  <div class="doc-row">
+    <label>Document</label>
+    <select id="doc-select" class="doc-select" onchange="onDocChange()">
+      <option value="">— loading documents —</option>
+    </select>
+    <button class="btn-s btn-icon" onclick="reloadDocuments()" title="Refresh document list">⟳</button>
+    <span class="sheets-found" id="sheets-found"></span>
+  </div>
+
+  <div class="controls">
+    <button class="btn-p" id="btn-run"     onclick="runRefresh(false)">↻ Refresh dividend dates</button>
+    <button class="btn-s" id="btn-preview" onclick="runRefresh(true)">Preview only</button>
+    <button class="btn-s" id="btn-stop"    onclick="stopRefresh()" style="display:none;background:var(--bg3);color:var(--danger);border-color:var(--danger);">⏹ Stop</button>
+    <button class="btn-s" onclick="openSettings()">⚙ Settings</button>
+    <label id="force-label" style="display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted);cursor:pointer;margin-left:4px;">
+      <input type="checkbox" id="force-fetch" style="accent-color:var(--warn);width:14px;height:14px;cursor:pointer;">
+      Force refresh all
+    </label>
+    <span id="status-msg"></span>
+  </div>
+
+  <div class="prog-track"><div class="prog-fill" id="prog"></div></div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr>
+        <th>Symbol</th><th>Sheet</th><th>Ex-div date</th><th>Pay date</th><th>Month columns filled</th><th>Status</th>
+      </tr></thead>
+      <tbody id="tbody">
+        <tr><td colspan="6"><div class="empty"><div class="big">No data yet</div>Select a document and click "Refresh dividend dates" to begin</div></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div id="log"></div>
+</main>
+
+<div id="overlay">
+  <div id="modal">
+    <h2>Settings</h2>
+    <div class="flabel">Alpha Vantage API Key <span style="color:var(--muted);font-weight:400">(1st — <a href="https://www.alphavantage.co/support/#api-key" target="_blank" style="color:var(--blue)">free key</a> · 25/day)</span></div>
+    <input class="finput" id="inp-av-key" type="password" placeholder="e.g. ABCDEF123456..." autocomplete="off">
+    <div class="flabel">FMP API Key <span style="color:var(--muted);font-weight:400">(2nd — <a href="https://financialmodelingprep.com/register" target="_blank" style="color:var(--blue)">free key</a> · 250/day)</span></div>
+    <input class="finput" id="inp-fmp-key" type="password" placeholder="e.g. abc123..." autocomplete="off">
+    <div class="flabel">Anthropic API Key <span style="color:var(--muted);font-weight:400">(4th fallback — Claude w/ web search)</span></div>
+    <input class="finput" id="inp-key" type="password" placeholder="sk-ant-api03-..." autocomplete="off">
+    <div class="flabel">NumBridge URL</div>
+    <input class="finput" id="inp-url" type="text" value="http://127.0.0.1:8765/mcp">
+    <div class="mfoot">
+      <button class="btn-s" onclick="closeSettings()">Cancel</button>
+      <button class="btn-p" onclick="saveSettings()">Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ─── CONFIG ───────────────────────────────────────────────────────────────────
+const HARDCODED_API_KEY   = "YOUR_API_KEY_HERE";  // ← Anthropic key (last resort)
+const HARDCODED_AV_KEY    = "YOUR_AV_KEY_HERE";   // ← Alpha Vantage (1st)
+const HARDCODED_FMP_KEY   = "YOUR_FMP_KEY_HERE";  // ← FMP (2nd)
+const HARDCODED_NUMBRIDGE = "http://127.0.0.1:8765/mcp";
+const MODEL               = "claude-sonnet-4-6";
+
+// ─── Settings ─────────────────────────────────────────────────────────────────
+const getKey    = () => localStorage.getItem("dr_key")     || HARDCODED_API_KEY;
+const getAvKey  = () => localStorage.getItem("dr_av_key")  || HARDCODED_AV_KEY;
+const getFmpKey = () => localStorage.getItem("dr_fmp_key") || HARDCODED_FMP_KEY;
+const getUrl    = () => localStorage.getItem("dr_url")     || HARDCODED_NUMBRIDGE;
+
+function openSettings() {
+  document.getElementById("inp-key").value     = getKey();
+  document.getElementById("inp-av-key").value  = getAvKey();
+  document.getElementById("inp-fmp-key").value = getFmpKey();
+  document.getElementById("inp-url").value     = getUrl();
+  document.getElementById("overlay").classList.add("open");
+}
+function closeSettings() { document.getElementById("overlay").classList.remove("open"); }
+function saveSettings() {
+  const k   = document.getElementById("inp-key").value.trim();
+  const av  = document.getElementById("inp-av-key").value.trim();
+  const fmp = document.getElementById("inp-fmp-key").value.trim();
+  const u   = document.getElementById("inp-url").value.trim();
+  if (k)   localStorage.setItem("dr_key",     k);
+  if (av)  localStorage.setItem("dr_av_key",  av);
+  if (fmp) localStorage.setItem("dr_fmp_key", fmp);
+  if (u)   localStorage.setItem("dr_url",     u);
+  closeSettings(); checkBanner();
+}
+function checkBanner() {
+  const av  = getAvKey();
+  const fmp = getFmpKey();
+  const k   = getKey();
+  const hasAny = (av  && av  !== "YOUR_AV_KEY_HERE")  ||
+                 (fmp && fmp !== "YOUR_FMP_KEY_HERE")  ||
+                 (k   && k   !== "YOUR_API_KEY_HERE");
+  document.getElementById("key-banner").classList.toggle("hidden", hasAny);
+}
+
+// ─── Document & sheet helpers ─────────────────────────────────────────────────
+function getSelectedDoc() {
+  return document.getElementById("doc-select").value;
+}
+
+function sheetLabel(sheet) {
+  if (sheet === "Portfolio") return "Brokerage";
+  return sheet.replace(/^Portfolio[-\s]*/i, "") || sheet;
+}
+
+function sheetTagClass(sheet) {
+  if (sheet === "Portfolio") return "brok";
+  return "ira";
+}
+
+function updateSubtitle() {
+  const doc = getSelectedDoc();
+  const sub = document.getElementById("header-sub");
+  sub.textContent = doc
+    ? doc.replace(/\.numbers$/i, "") + " · Portfolio sheets"
+    : "No document selected";
+}
+
+async function onDocChange() {
+  updateSubtitle();
+  await updateSheetsFound();
+}
+
+async function updateSheetsFound() {
+  const doc = getSelectedDoc();
+  const el  = document.getElementById("sheets-found");
+  if (!doc) { el.innerHTML = ""; return; }
+  try {
+    const sheets = await getPortfolioSheets(doc);
+    if (sheets.length === 0) {
+      el.innerHTML = "<span style='color:var(--danger);font-size:11px'>No Portfolio sheets found</span>";
+    } else {
+      el.innerHTML = sheets.map(s =>
+        "<span class='sheet-pill'>" + s + "</span>"
+      ).join("");
+    }
+  } catch(e) {
+    el.innerHTML = "<span style='color:var(--danger);font-size:11px'>Error reading sheets</span>";
+  }
+}
+
+async function reloadDocuments() {
+  const sel = document.getElementById("doc-select");
+  sel.innerHTML = "<option value=''>— loading —</option>";
+  document.getElementById("sheets-found").innerHTML = "";
+  try {
+    await nbInit();
+    const content = await nbTool("list_documents", {});
+    // list_documents returns all doc names concatenated in one text blob.
+    // Names end with ".numbers" — split on that boundary.
+    let raw = (content[0]?.text || "").trim();
+    let docs = [];
+    // Split by ".numbers" and reconstruct each name
+    const parts = raw.split(/(?<=\.numbers)/);
+    docs = parts.map(s => s.trim()).filter(Boolean);
+    // Fallback: newline split
+    if (docs.length <= 1 && raw.includes("\n")) {
+      docs = raw.split("\n").map(s => s.trim()).filter(Boolean);
+    }
+    if (docs.length === 0) {
+      sel.innerHTML = "<option value=''>— no open documents —</option>";
+      return;
+    }
+    sel.innerHTML = docs.map(d => `<option value="${d}">${d.replace(/\.numbers$/i,"")}</option>`).join("");
+    // Auto-select first portfolio-related doc that isn't the template
+    const portfolioDoc = docs.find(d =>
+      d.toLowerCase().includes("portfolio") && !d.toLowerCase().includes("template")
+    );
+    sel.value = portfolioDoc || docs[0];
+    updateSubtitle();
+    await updateSheetsFound();
+  } catch(e) {
+    sel.innerHTML = "<option value=''>— error —</option>";
+    log("Could not load documents: " + e.message, "ler");
+  }
+}
+
+async function getPortfolioSheets(docName) {
+  const content = await nbTool("list_sheets", { document: docName });
+  const raw = (content[0]?.text || "").trim();
+
+  // Try newline split first
+  let sheets = raw.split("\n").map(s => s.trim()).filter(Boolean);
+  if (sheets.length > 1) return sheets.filter(s => s.startsWith("Portfolio"));
+
+  // Blob is concatenated e.g. "PortfolioPortfolio-IRA2025Q4..."
+  // Split by finding each occurrence of "Portfolio" using indexOf
+  sheets = [];
+  let pos = 0;
+  while (pos < raw.length) {
+    const next = raw.indexOf("Portfolio", pos + 1);
+    const chunk = next === -1 ? raw.slice(pos) : raw.slice(pos, next);
+    if (chunk) sheets.push(chunk.trim());
+    if (next === -1) break;
+    pos = next;
+  }
+  // Handle case where raw starts with Portfolio
+  if (raw.startsWith("Portfolio")) {
+    // Already handled — pos starts at 0
+  }
+  log("Sheets found: " + sheets.join(", "), "li");
+  return sheets.filter(s => s.startsWith("Portfolio"));
+}
+
+// ─── Dynamic column map ────────────────────────────────────────────────────────
+// Read header row cell-by-cell. We limit to MAX_COLS and reinit session
+// partway through to avoid stale-session hangs.
+async function readColMap(doc, sheet, table) {
+  const MAX_COLS = 32;
+  const headers  = [];
+
+  // Read in two batches with a session reinit between to avoid hangs
+  for (let c = 1; c <= MAX_COLS; c++) {
+    if (c === 17) await nbInit();  // reinit midway
+    try {
+      const content = await nbTool("get_cell", { document: doc, sheet, table, row: 1, column: c });
+      headers.push((content[0]?.text || "").trim());
+    } catch(e) {
+      break;  // out of bounds
+    }
+  }
+
+  // headers is now a 0-based array matching actual column positions
+  const find = (...names) => {
+    for (const name of names) {
+      const idx = headers.findIndex(h => h && h.toLowerCase().includes(name.toLowerCase()));
+      if (idx >= 0) return idx;  // 0-based; callers add +1 for NumBridge
+    }
+    return -1;
+  };
+
+  const divsIdx    = find("divs/year", "divs year");
+  const monthStart = divsIdx >= 0 ? divsIdx + 1 : headers.length - 4;
+
+  const colMap = {
+    _numCols:    headers.length,
+    _headers:    headers,
+    SYMBOL:      find("symbol"),
+    SHARES:      find("shares"),
+    ANN_DIV:     find("ann div / sh", "ann div/sh"),
+    EX_DIV:      find("ex-div date", "ex-div"),
+    PAY_DATE:    find("div pay date", "pay date"),
+    DIVS_YEAR:   find("divs/year"),
+    MONTH_START: monthStart,
+  };
+
+  log("Col map (1-based) — Symbol:" + (colMap.SYMBOL+1) +
+      " Shares:" + (colMap.SHARES+1) +
+      " AnnDiv:" + (colMap.ANN_DIV+1) +
+      " ExDiv:" + (colMap.EX_DIV+1) +
+      " PayDate:" + (colMap.PAY_DATE+1) +
+      " DivsYear:" + (colMap.DIVS_YEAR+1) +
+      " MonthStart:" + (colMap.MONTH_START+1), "li");
+
+  return colMap;
+}
+
+// ─── UI helpers ───────────────────────────────────────────────────────────────
+let running = false;
+
+function log(msg, cls="li") {
+  const el = document.getElementById("log");
+  el.style.display = "block";
+  const d = document.createElement("div");
+  d.className = cls;
+  d.textContent = "[" + new Date().toLocaleTimeString() + "] " + msg;
+  el.appendChild(d);
+  el.scrollTop = el.scrollHeight;
+}
+function clearLog() { const e = document.getElementById("log"); e.innerHTML = ""; e.style.display = "none"; }
+function setStatus(m) { document.getElementById("status-msg").textContent = m; }
+function setProg(p)   { document.getElementById("prog").style.width = p + "%"; }
+function setStats(t, u, s, e) {
+  document.getElementById("s-total").textContent   = t ?? "—";
+  document.getElementById("s-updated").textContent = u ?? "—";
+  document.getElementById("s-skipped").textContent = s ?? "—";
+  document.getElementById("s-errors").textContent  = e ?? "—";
+}
+function setBtns(dis) {
+  document.getElementById("btn-run").disabled     = dis;
+  document.getElementById("btn-preview").disabled = dis;
+  document.getElementById("btn-stop").style.display = dis ? "inline-block" : "none";
+}
+
+async function waitWithCountdown(ms, reason) {
+  const bar       = document.getElementById("delay-bar");
+  const countdown = document.getElementById("delay-countdown");
+  const current   = document.getElementById("delay-current");
+  bar.classList.remove("hidden");
+  current.textContent = (ms / 1000).toFixed(0);
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (stopped) { bar.classList.add("hidden"); return; }
+    countdown.textContent = Math.ceil((end - Date.now()) / 1000);
+    await new Promise(r => setTimeout(r, 500));
+  }
+  bar.classList.add("hidden");
+}
+
+// ─── Rolling months ───────────────────────────────────────────────────────────
+function getRollingMonths() {
+  return Array.from({ length: 4 }, (_, i) => {
+    const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() + i);
+    return { name: d.toLocaleDateString("en-US", { month: "long", year: "numeric" }), index: i };
+  });
+}
+function monthKey(dateStr) {
+  if (!dateStr) return null;
+  return new Date(dateStr).toLocaleDateString("en-US", { month: "long", year: "numeric" });
+}
+function fmtDate(str) {
+  if (!str) return "—";
+  return new Date(str).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+function parseNum(v) { return parseFloat(String(v || "0").replace(/[$,]/g, "")) || 0; }
+
+function computeMonthAmountsFromValues(annDivPerShare, divsPerYear, payDate, shares, months) {
+  const dpy = divsPerYear || 4;
+  const adp = parseNum(annDivPerShare);
+  if (!adp) return Object.fromEntries(months.map(m => [m.name, null]));
+  const amt = Math.round((adp / dpy * parseNum(shares)) * 100) / 100;
+  const result = Object.fromEntries(months.map(m => [m.name, null]));
+  if (dpy === 12) {
+    months.forEach(m => result[m.name] = amt);
+  } else if (payDate) {
+    // Build the key the same way getRollingMonths does — must match exactly
+    const d = new Date(payDate + "T12:00:00");  // noon UTC avoids timezone day shift
+    if (!isNaN(d)) {
+      const k = d.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+      if (k in result) result[k] = amt;
+    }
+  }
+  return result;
+}
+
+function computeMonthAmounts(t, months) {
+  return computeMonthAmountsFromValues(
+    t.annDivPerShare, parseInt(t.divsPerYear) || 4, t.newPayDate || t.payDate, t.shares, months
+  );
+}
+
+// ─── NumBridge MCP client ─────────────────────────────────────────────────────
+let nbSession = null;
+
+function parseSse(text) {
+  const line = text.split("\n").find(l => l.startsWith("data:"));
+  if (!line) return null;
+  try { return JSON.parse(line.slice(5)); } catch(e) { return null; }
+}
+
+async function nbInit() {
+  nbSession = null;
+  const resp = await fetch(getUrl(), {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {
+      protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "dividend-refresher", version: "1.1" }
+    }})
+  });
+  nbSession = resp.headers.get("mcp-session-id");
+  if (!nbSession) throw new Error("NumBridge did not return a session ID — is it running?");
+  const data = parseSse(await resp.text());
+  if (!data?.result) throw new Error("NumBridge init failed");
+  log("NumBridge connected (session " + nbSession.slice(0, 8) + "...)", "lok");
+}
+
+async function nbTool(name, args) {
+  if (!nbSession) await nbInit();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000); // 15s timeout
+  try {
+    const resp = await fetch(getUrl(), {
+      method: "POST",
+      signal: controller.signal,
+      headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream", "mcp-session-id": nbSession },
+      body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name, arguments: args } })
+    });
+    clearTimeout(timeout);
+    if (!resp.ok) { const t = await resp.text(); throw new Error("NumBridge " + name + " " + resp.status + ": " + t.slice(0, 150)); }
+    const data = parseSse(await resp.text());
+    if (data?.error) throw new Error("NumBridge: " + data.error.message);
+    return data?.result?.content || [];
+  } catch(e) {
+    clearTimeout(timeout);
+    if (e.name === "AbortError") throw new Error("NumBridge " + name + " timed out after 15s — is NumBridge running?");
+    throw e;
+  }
+}
+
+// ─── Read portfolio — all Portfolio sheets ────────────────────────────────────
+async function readPortfolio() {
+  const doc = getSelectedDoc();
+  if (!doc) throw new Error("No document selected — please choose a Numbers document");
+
+  log("Reading from: " + doc, "lsec");
+  await nbInit();
+
+  const sheets = await getPortfolioSheets(doc);
+  if (sheets.length === 0) throw new Error("No sheets starting with 'Portfolio' found in " + doc);
+  log("Portfolio sheets: " + sheets.join(", "), "li");
+
+  const allTickers = [];
+  const MONEY_MARKETS = new Set(["SPAXX","FZDXX","FZROX","FZILX","FCASH"]);
+  const isCusip = sym => /^\d{9}[A-Z]\d$/.test(sym);
+
+  for (const sheet of sheets) {
+    log("Reading sheet: " + sheet + "...", "li");
+
+    let colMap;
+    try {
+      colMap = await readColMap(doc, sheet, "My Portfolio");
+    } catch(e) {
+      log("Could not read " + sheet + ": " + e.message, "lwarn");
+      continue;
+    }
+
+    if (colMap.SYMBOL < 0) {
+      log("Sheet " + sheet + " missing Symbol column — skipping", "lwarn");
+      continue;
+    }
+
+    // Reinit session before row scan — readColMap may have used many calls
+    await nbInit();
+    log("Starting row scan for " + sheet + "...", "li");
+
+    let r = 2;
+    let sheetCount = 0;
+    let callCount = 0;
+
+    const nbGet = async (row, col) => {
+      // Reinit session every 20 calls to prevent stale session hangs
+      callCount++;
+      if (callCount % 20 === 0) {
+        await nbInit();
+      }
+      const c = await nbTool("get_cell", {
+        document: doc, sheet, table: "My Portfolio", row, column: col
+      });
+      return (c[0]?.text || "").trim();
+    };
+
+    while (true) {
+      setStatus("Reading " + sheet + " row " + r + "...");
+      let symbol = "";
+      try {
+        symbol = await nbGet(r, colMap.SYMBOL + 1);
+      } catch(e) {
+        log("Row " + r + ": " + e.message + " — stopping", "lwarn");
+        break;
+      }
+
+      if (!symbol || symbol === "Portfolio" || symbol.startsWith("Portfolio")) {
+        log("Sheet " + sheet + ": end at row " + r + " (" + (symbol||"empty") + ")", "li");
+        break;
+      }
+
+      log("  row " + r + ": " + symbol, "li");
+      const symUpper = symbol.toUpperCase();
+
+      if (!isCusip(symbol) && !MONEY_MARKETS.has(symUpper)) {
+        // Fetch 5 cells sequentially (not parallel) to keep call count predictable
+        const shares    = await nbGet(r, colMap.SHARES    + 1);
+        const annDiv    = colMap.ANN_DIV   >= 0 ? await nbGet(r, colMap.ANN_DIV   + 1) : "";
+        const exDiv     = colMap.EX_DIV    >= 0 ? await nbGet(r, colMap.EX_DIV    + 1) : "";
+        const payDate   = colMap.PAY_DATE  >= 0 ? await nbGet(r, colMap.PAY_DATE  + 1) : "";
+        const divsYear  = colMap.DIVS_YEAR >= 0 ? await nbGet(r, colMap.DIVS_YEAR + 1) : "";
+
+        allTickers.push({
+          row: r, sheet, doc, colMap, symbol,
+          shares, annDivPerShare: annDiv,
+          exDivDate: exDiv, payDate, divsPerYear: divsYear,
+        });
+        log("    → shares=" + shares + " annDiv=" + (annDiv||"–") + " pay=" + (payDate||"–"), "li");
+        sheetCount++;
+      }
+      r++;
+    }
+
+    log("Sheet " + sheet + ": " + sheetCount + " tickers ✓", "lok");
+  }
+
+  return allTickers;
+}
+
+// ─── Token-aware rate limiter ──────────────────────────────────────────────────
+// Web search calls consistently use 16k-20k tokens each.
+// At 30k/min limit we can fit ~1-2 calls per minute.
+// tokenEstimate seeds at 20k (realistic) so first call doesn't over-pace.
+const TOKEN_LIMIT    = 30000;
+const WINDOW_MS      = 60000;
+const HEADROOM       = 0.95;   // use 95% of budget — give a small safety margin
+const OUTLIER_CAP    = 25000;  // calls over this excluded from estimate
+const MAX_RETRIES    = 4;
+
+let stopped = false;
+
+function stopRefresh() {
+  stopped = true;
+  document.getElementById("btn-stop").style.display = "none";
+  setStatus("Stopping after current ticker...");
+  log("Stop requested — will finish current ticker then halt.", "lwarn");
+}
+
+const tokenLog     = [];
+const recentTokens = [];
+let tokenEstimate  = 20000;  // seeded at observed average; calibrates after first call
+
+function tokenLogClean() {
+  const cutoff = Date.now() - WINDOW_MS;
+  while (tokenLog.length && tokenLog[0].ts < cutoff) tokenLog.shift();
+}
+function tokensUsedInWindow() {
+  tokenLogClean();
+  return tokenLog.reduce((sum, e) => sum + e.tokens, 0);
+}
+function recordTokens(tokens) {
+  tokenLog.push({ ts: Date.now(), tokens });
+  if (tokens <= OUTLIER_CAP) {
+    recentTokens.push(tokens);
+    if (recentTokens.length > 8) recentTokens.shift();
+    const sorted = [...recentTokens].sort((a, b) => a - b);
+    const mid    = Math.floor(sorted.length / 2);
+    const median = sorted.length % 2 === 0
+      ? Math.round((sorted[mid-1] + sorted[mid]) / 2)
+      : sorted[mid];
+    tokenEstimate = Math.round(median * 1.1);
+  } else {
+    log("Outlier call: " + tokens + " tokens — excluded from estimate", "lwarn");
+  }
+}
+
+async function waitForTokenBudget(ticker) {
+  if (stopped) return;
+  const budget = TOKEN_LIMIT * HEADROOM;
+
+  // Find minimum wait: iterate token log to find which entries need to expire
+  // before we have enough budget for the next call
+  while (true) {
+    if (stopped) return;
+    tokenLogClean();
+    const used      = tokensUsedInWindow();
+    const available = budget - used;
+    if (available >= tokenEstimate) return;  // enough budget — go
+
+    // Find the earliest entry whose expiry would free enough tokens
+    let msToWait = null;
+    let runningUsed = used;
+    for (const entry of tokenLog) {
+      runningUsed -= entry.tokens;
+      if (budget - runningUsed >= tokenEstimate) {
+        // Expiring this entry is enough — wait until it expires
+        msToWait = (entry.ts + WINDOW_MS) - Date.now() + 200;
+        break;
+      }
+    }
+
+    if (!msToWait || msToWait <= 0) return;  // shouldn't happen
+
+    const waitSec = (msToWait / 1000).toFixed(1);
+    log(ticker + ": pacing (" + Math.round(used) + "/" + Math.round(budget) +
+        " tokens, est " + tokenEstimate + "/call) — waiting " + waitSec + "s", "lwarn");
+    setStatus("Pacing — waiting " + waitSec + "s for token budget...");
+    document.getElementById("delay-current").textContent = tokenEstimate;
+    await waitWithCountdown(msToWait, ticker);
+    if (stopped) return;
+  }
+}
+
+// ─── Shared helpers ───────────────────────────────────────────────────────────
+
+// Infer dividend frequency from annual rate vs single payment amount
+function inferFrequency(annualRate, singlePayment) {
+  if (!annualRate || !singlePayment || annualRate <= 0 || singlePayment <= 0) return 4;
+  const ratio = annualRate / singlePayment;
+  if      (ratio >= 11   && ratio <= 13)   return 12;
+  else if (ratio >= 3.5  && ratio <= 4.5)  return 4;
+  else if (ratio >= 1.75 && ratio <= 2.25) return 2;
+  else if (ratio >= 0.8  && ratio <= 1.2)  return 1;
+  // ratio near 4 but singlePayment ≈ annualRate means it's annual paid once
+  // (e.g. WMT: annual=$0.94, single=$0.94 → ratio=1 → already caught above)
+  return 4;  // default quarterly
+}
+
+// Normalise a date string to YYYY-MM-DD or null
+function normDate(s) {
+  if (!s || s === "None" || s === "0000-00-00" || s === "–" || s === "-") return null;
+  const d = new Date(s);
+  return isNaN(d) ? null : d.toISOString().split("T")[0];
+}
+
+// Is a result "good enough" to use?
+// Accept if: has current/future dates OR has a positive ann_div (dates-free result
+// is still useful for writing ann_div and frequency to the sheet)
+function resultUsable(r) {
+  if (!r) return false;
+  const todayStr = new Date().toISOString().split("T")[0];
+  const fomStr   = new Date(new Date().getFullYear(), new Date().getMonth(), 1)
+                     .toISOString().split("T")[0];
+  const exOk  = r.ex_div   && r.ex_div   >= todayStr;
+  const payOk = r.pay_date && r.pay_date >= fomStr;
+  const divOk = r.ann_div_per_share > 0;
+  return exOk || payOk || divOk;
+}
+
+// ─── Source 1: Alpha Vantage ──────────────────────────────────────────────────
+// Free: 25 req/day, 5 req/min. Uses OVERVIEW + DIVIDENDS endpoints.
+
+let avLastCallTime = 0;
+const AV_MIN_MS = 13000;  // 5/min → 12s apart + buffer
+
+async function avThrottle(label) {
+  const wait = AV_MIN_MS - (Date.now() - avLastCallTime);
+  if (avLastCallTime > 0 && wait > 0) {
+    log(label + " [AV]: throttling " + (wait/1000).toFixed(1) + "s", "li");
+    await new Promise(r => setTimeout(r, wait));
+  }
+  avLastCallTime = Date.now();
+}
+
+async function fetchFromAlphaVantage(ticker) {
+  const key = getAvKey();
+  if (!key || key === "YOUR_AV_KEY_HERE") return null;
+
+  try {
+    // OVERVIEW — annual div, ex-date
+    await avThrottle(ticker);
+    const oResp = await fetch(
+      `https://www.alphavantage.co/query?function=OVERVIEW&symbol=${encodeURIComponent(ticker)}&apikey=${key}`
+    );
+    if (!oResp.ok) return null;
+    const o = await oResp.json();
+    if (!o.Symbol || o.Note || o.Information) {
+      if (o.Note || o.Information) log(ticker + " [AV]: quota/rate limit hit", "lwarn");
+      return null;
+    }
+
+    const annDiv = parseFloat(o.ForwardAnnualDividendRate) || parseFloat(o.DividendPerShare) || null;
+    let exDiv    = normDate(o.ExDividendDate);
+    let payDate  = exDiv ? normDate(new Date(new Date(exDiv).getTime() + 14*86400000).toISOString()) : null;
+    let freq     = null;
+
+    // DIVIDENDS — actual pay dates and frequency
+    await avThrottle(ticker);
+    const dResp = await fetch(
+      `https://www.alphavantage.co/query?function=DIVIDENDS&symbol=${encodeURIComponent(ticker)}&apikey=${key}`
+    );
+    if (dResp.ok) {
+      const d = await dResp.json();
+      if (d.data?.length > 0) {
+        const todayStr = new Date().toISOString().split("T")[0];
+        const upcoming = d.data.find(e => e.ex_dividend_date >= todayStr);
+        const best     = upcoming || d.data[0];
+        if (best) {
+          if (best.ex_dividend_date) exDiv   = normDate(best.ex_dividend_date);
+          if (best.payment_date)     payDate = normDate(best.payment_date);
+          if (annDiv && best.amount) freq    = inferFrequency(annDiv, parseFloat(best.amount));
+        }
+      }
+    }
+
+    if (!annDiv && !exDiv) return null;
+    return { ex_div: exDiv, pay_date: payDate, ann_div_per_share: annDiv,
+             divs_per_year: freq || 4, source: "alphavantage" };
+
+  } catch(e) {
+    log(ticker + " [AV]: " + e.message, "lwarn");
+    return null;
+  }
+}
+
+// ─── Source 2: Financial Modeling Prep ───────────────────────────────────────
+// Free: 250 req/day, no per-minute limit stated.
+// Uses /stock_dividend_adjusted for history and /profile for annual rate.
+
+async function fetchFromFMP(ticker) {
+  const key = getFmpKey();
+  if (!key || key === "YOUR_FMP_KEY_HERE") return null;
+
+  try {
+    // Profile — annual dividend, yield
+    const pResp = await fetch(
+      `https://financialmodelingprep.com/api/v3/profile/${encodeURIComponent(ticker)}?apikey=${key}`
+    );
+    if (!pResp.ok) return null;
+    const profiles = await pResp.json();
+    if (!profiles?.length) return null;
+    const p = profiles[0];
+    if (p["Error Message"] || p.error) return null;
+
+    const annDiv = parseFloat(p.lastDiv) > 0
+      ? null  // lastDiv is per-payment not annual — get annual from dividends endpoint
+      : null;
+
+    // Dividend history — get upcoming/recent pay dates and infer frequency
+    const dResp = await fetch(
+      `https://financialmodelingprep.com/api/v3/historical-price-full/stock_dividend/${encodeURIComponent(ticker)}?apikey=${key}`
+    );
+    if (!dResp.ok) return null;
+    const dData = await dResp.json();
+    const history = dData.historical || [];
+    if (!history.length) return null;
+
+    const todayStr = new Date().toISOString().split("T")[0];
+    const firstOfMonthStr = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().split("T")[0];
+
+    // Find upcoming or most recent entry
+    const upcoming = history.find(e => e.date >= todayStr);         // ex-div in future
+    const recent   = history.find(e => e.paymentDate >= firstOfMonthStr); // pay still current
+    const best     = upcoming || recent || history[0];
+
+    const exDiv   = normDate(best.date);
+    const payDate = normDate(best.paymentDate);
+    const divAmt  = parseFloat(best.dividend);
+
+    // Infer annual from last 4 or 12 entries
+    let annualDiv = null;
+    if (divAmt > 0 && history.length >= 2) {
+      // Sum last 12 months worth of payments
+      const oneYearAgo = new Date(); oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+      const yearAgoStr = oneYearAgo.toISOString().split("T")[0];
+      const yearPayments = history.filter(e => e.date >= yearAgoStr);
+      if (yearPayments.length > 0) {
+        annualDiv = yearPayments.reduce((s, e) => s + parseFloat(e.dividend || 0), 0);
+        annualDiv = Math.round(annualDiv * 100) / 100;
+      }
+    }
+
+    const freq = annualDiv ? inferFrequency(annualDiv, divAmt) : 4;
+
+    if (!annualDiv && !exDiv) return null;
+    return { ex_div: exDiv, pay_date: payDate, ann_div_per_share: annualDiv,
+             divs_per_year: freq, source: "fmp" };
+
+  } catch(e) {
+    log(ticker + " [FMP]: " + e.message, "lwarn");
+    return null;
+  }
+}
+
+// ─── Source 3: Yahoo Finance ──────────────────────────────────────────────────
+// No key required. Uses quoteSummary with calendarEvents + assetProfile modules.
+// Note: unofficial API — may break. CORS headers allow browser access in practice.
+
+async function fetchFromYahoo(ticker) {
+  try {
+    const modules = "summaryDetail,calendarEvents";
+    const url = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(ticker)}?modules=${modules}&corsDomain=finance.yahoo.com`;
+    const resp = await fetch(url, {
+      headers: { "Accept": "application/json" }
+    });
+    if (!resp.ok) {
+      // Try query2 as backup
+      const url2 = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(ticker)}?modules=${modules}`;
+      const resp2 = await fetch(url2, { headers: { "Accept": "application/json" } });
+      if (!resp2.ok) return null;
+      return parseYahooResponse(ticker, await resp2.json());
+    }
+    return parseYahooResponse(ticker, await resp.json());
+  } catch(e) {
+    log(ticker + " [Yahoo]: " + e.message, "lwarn");
+    return null;
+  }
+}
+
+function parseYahooResponse(ticker, data) {
+  try {
+    const result = data?.quoteSummary?.result?.[0];
+    if (!result) return null;
+
+    const sd  = result.summaryDetail || {};
+    const cal = result.calendarEvents || {};
+
+    const annDiv   = sd.dividendRate?.raw || null;
+    const divYield = sd.dividendYield?.raw || null;
+    const freq     = sd.dividendRate?.raw && sd.trailingAnnualDividendRate?.raw
+      ? inferFrequency(sd.dividendRate.raw, sd.trailingAnnualDividendRate.raw / 4)
+      : 4;
+
+    // Ex-div date from summaryDetail
+    const exDivTs  = sd.exDividendDate?.raw;
+    const exDiv    = exDivTs ? normDate(new Date(exDivTs * 1000).toISOString()) : null;
+
+    // Pay date from calendarEvents
+    const payTs    = cal.dividendDate?.raw;
+    const payDate  = payTs  ? normDate(new Date(payTs  * 1000).toISOString()) : null;
+
+    if (!annDiv && !exDiv) return null;
+    return { ex_div: exDiv, pay_date: payDate, ann_div_per_share: annDiv,
+             divs_per_year: freq, source: "yahoo" };
+  } catch(e) {
+    log(ticker + " [Yahoo parse]: " + e.message, "lwarn");
+    return null;
+  }
+}
+
+// ─── Source 4: Claude API (last resort — web search for accuracy) ─────────────
+// Uses web search for current dates. ~18-20k tokens/call. Rate limited.
+
+async function fetchFromClaude(ticker) {
+  const key = getKey();
+  if (!key || key === "YOUR_API_KEY_HERE") return null;  // no key = skip silently
+  if (stopped) throw new Error("Stopped by user");
+
+  await waitForTokenBudget(ticker);
+
+  const today = new Date().toISOString().split("T")[0];
+  const headers = {
+    "Content-Type": "application/json",
+    "x-api-key": key,
+    "anthropic-version": "2023-06-01",
+    "anthropic-dangerous-direct-browser-access": "true"
+  };
+
+  const body = JSON.stringify({
+    model: MODEL,
+    max_tokens: 500,
+    system: "You are a financial data assistant. Use web search to find current dividend information. Return ONLY a raw JSON object, no markdown, no preamble.",
+    messages: [{ role: "user", content:
+      "Find current dividend information for " + ticker + " as of " + today + ". " +
+      "Search for: annual dividend per share in USD, payments per year, " +
+      "next ex-dividend date, next pay date. " +
+      "The pay date may be earlier in the current month — include if it falls in the current month. " +
+      "Return ONLY: {\"ann_div_per_share\": number_or_null, \"divs_per_year\": integer_or_null, " +
+      "\"ex_div_date\": \"YYYY-MM-DD_or_null\", \"pay_date\": \"YYYY-MM-DD_or_null\"}"
+    }],
+    tools: [{ type: "web_search_20250305", name: "web_search" }]
+  });
+
+  let retryDelay = 10000;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    if (stopped) throw new Error("Stopped by user");
+    const resp = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers, body });
+
+    if (resp.status === 429 || resp.status === 529) {
+      const reason = resp.status === 529 ? "Overloaded" : "Rate limited";
+      if (attempt === MAX_RETRIES) throw new Error(reason + " after " + MAX_RETRIES + " attempts");
+      log(ticker + " [Claude]: " + resp.status + " — retrying in " + (retryDelay/1000) + "s", "lwarn");
+      await waitWithCountdown(retryDelay, ticker);
+      retryDelay = Math.min(retryDelay * 2, 60000);
+      continue;
+    }
+
+    const data = await resp.json();
+    if (!resp.ok || data.error) throw new Error("Claude " + resp.status + ": " + (data.error?.message || "unknown"));
+
+    const tokens = data.usage?.input_tokens || tokenEstimate;
+    recordTokens(tokens);
+    log(ticker + " [Claude]: " + tokens + " tokens", "li");
+
+    const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("\n");
+    if (!text) throw new Error("No text in Claude response");
+
+    try {
+      const clean = text.replace(/```json|```/g, "").trim();
+      const j = JSON.parse(clean.slice(clean.indexOf("{"), clean.lastIndexOf("}") + 1));
+      return {
+        ex_div:            normDate(j.ex_div_date),
+        pay_date:          normDate(j.pay_date),
+        ann_div_per_share: j.ann_div_per_share > 0 ? j.ann_div_per_share : null,
+        divs_per_year:     j.divs_per_year     > 0 ? j.divs_per_year     : null,
+        source:            "claude",
+      };
+    } catch(e) {
+      const dates = text.match(/\d{4}-\d{2}-\d{2}/g);
+      return { ex_div: dates?.[0]||null, pay_date: dates?.[1]||null,
+               ann_div_per_share: null, divs_per_year: null, source: "claude" };
+    }
+  }
+  throw new Error("Claude failed after " + MAX_RETRIES + " attempts");
+}
+
+// ─── Cascade: try all sources in order ────────────────────────────────────────
+async function fetchDivDates(ticker) {
+  const sources = [
+    { name: "AV",     fn: () => fetchFromAlphaVantage(ticker) },
+    { name: "FMP",    fn: () => fetchFromFMP(ticker) },
+    { name: "Yahoo",  fn: () => fetchFromYahoo(ticker) },
+    { name: "Claude", fn: () => fetchFromClaude(ticker) },
+  ];
+
+  for (const src of sources) {
+    if (stopped) throw new Error("Stopped by user");
+    let result = null;
+    try {
+      result = await src.fn();
+    } catch(e) {
+      log(ticker + " [" + src.name + "]: error — " + e.message, "lwarn");
+      if (src.name === "Claude") throw e;  // Claude errors propagate (rate limit etc)
+      continue;
+    }
+    if (result && resultUsable(result)) {
+      log(ticker + " [" + src.name + "]: ex-div=" + (result.ex_div||"–") +
+          " pay=" + (result.pay_date||"–") +
+          (result.ann_div_per_share ? " ann=$" + result.ann_div_per_share : "") +
+          (result.divs_per_year     ? " freq=" + result.divs_per_year + "x" : ""), "lok");
+      return result;
+    }
+    if (result) {
+      log(ticker + " [" + src.name + "]: returned data but dates are stale — trying next", "lwarn");
+    } else {
+      log(ticker + " [" + src.name + "]: no data — trying next", "li");
+    }
+  }
+
+  // All sources exhausted — return empty result
+  return { ex_div: null, pay_date: null, ann_div_per_share: null, divs_per_year: null, source: "none" };
+}
+
+// ─── Write back to Numbers ────────────────────────────────────────────────────
+async function writeTicker(t, months) {
+  const doc    = t.doc;
+  const sheet  = t.sheet;
+  const table  = "My Portfolio";
+  const CI     = t.colMap;
+
+  // Use freshly fetched ann_div and divs_per_year if available,
+  // otherwise fall back to what was already in the sheet
+  const annDiv  = t.newAnnDiv   != null ? t.newAnnDiv   : parseNum(t.annDivPerShare);
+  const divsPy  = t.newDivsPy   != null ? t.newDivsPy   : (parseInt(t.divsPerYear) || 4);
+
+  // Write ann_div_per_share if we have a fresh value and the column exists
+  if (t.newAnnDiv != null && CI.ANN_DIV >= 0) {
+    await nbTool("set_cell", {
+      document: doc, sheet, table,
+      row: t.row, column: CI.ANN_DIV + 1,
+      value: t.newAnnDiv,
+      number_format: "currency"
+    });
+  }
+
+  // Write divs_per_year if we have a fresh value
+  if (t.newDivsPy != null && CI.DIVS_YEAR >= 0) {
+    await nbTool("set_cell", {
+      document: doc, sheet, table,
+      row: t.row, column: CI.DIVS_YEAR + 1,
+      value: t.newDivsPy,
+      number_format: "number"
+    });
+  }
+
+  if (t.newExDiv && CI.EX_DIV >= 0) {
+    await nbTool("set_cell", {
+      document: doc, sheet, table,
+      row: t.row, column: CI.EX_DIV + 1,
+      value: t.newExDiv
+    });
+  }
+  if (t.newPayDate && CI.PAY_DATE >= 0) {
+    await nbTool("set_cell", {
+      document: doc, sheet, table,
+      row: t.row, column: CI.PAY_DATE + 1,
+      value: t.newPayDate
+    });
+  }
+
+  // Compute monthly amounts using fresh values
+  const amounts = computeMonthAmountsFromValues(annDiv, divsPy, t.newPayDate || t.payDate, t.shares, months);
+
+  for (let i = 0; i < months.length; i++) {
+    const val = amounts[months[i].name];
+    if (CI.MONTH_START >= 0) {
+      await nbTool("set_cell", {
+        document: doc, sheet, table,
+        row: t.row,
+        column: CI.MONTH_START + 1 + i,
+        value: val !== null ? Math.round(val * 100) / 100 : "",
+        number_format: "currency"
+      });
+    }
+  }
+}
+
+// ─── Table rendering ──────────────────────────────────────────────────────────
+function renderRows(tickers) {
+  const tbody = document.getElementById("tbody");
+  tbody.innerHTML = "";
+  tickers.forEach(t => {
+    const dpy  = parseInt(t.divsPerYear) || 4;
+    const fl   = { 12: "monthly", 4: "quarterly", 2: "semi-ann", 1: "annual" }[dpy] || (dpy + "x");
+    const slbl = sheetLabel(t.sheet);
+    const stag = sheetTagClass(t.sheet);
+    const tr   = document.createElement("tr");
+    tr.innerHTML =
+      "<td class='sym'>" + t.symbol + "<span class='freq " + (dpy === 12 ? "mo" : "") + "'>" + fl + "</span></td>" +
+      "<td><span class='sheet-tag " + stag + "'>" + slbl + "</span></td>" +
+      "<td id='ex-"  + t.symbol + "' style='color:var(--muted)'>—</td>" +
+      "<td id='pay-" + t.symbol + "' style='color:var(--muted)'>—</td>" +
+      "<td id='mo-"  + t.symbol + "'>—</td>" +
+      "<td id='st-"  + t.symbol + "'><span class='badge b-pending'>pending</span></td>";
+    tbody.appendChild(tr);
+  });
+}
+
+function updateRow(t, months) {
+  const ex  = document.getElementById("ex-"  + t.symbol);
+  const pay = document.getElementById("pay-" + t.symbol);
+  const mo  = document.getElementById("mo-"  + t.symbol);
+  const st  = document.getElementById("st-"  + t.symbol);
+  if (ex)  ex.textContent  = fmtDate(t.newExDiv);
+  if (pay) pay.textContent = fmtDate(t.newPayDate);
+  if (mo) {
+    if (t.status === "updated") {
+      const amounts = computeMonthAmounts(t, months);
+      const dpy     = parseInt(t.divsPerYear) || 4;
+      const filled  = months.filter(m => amounts[m.name] !== null);
+      mo.innerHTML  = filled.length === 0
+        ? "<span style='color:var(--muted);font-size:11px'>outside window</span>"
+        : filled.map(m => "<span class='pill " + (dpy === 12 ? "all" : "") + "'>" + m.name.split(" ")[0] + "</span>").join("");
+    } else if (t.status === "working") {
+      mo.innerHTML = "<span style='color:var(--muted);font-size:11px'>fetching...</span>";
+    }
+  }
+  const bc = { updated: "b-updated", error: "b-error", skipped: "b-skipped", working: "b-working", current: "b-current" }[t.status] || "b-pending";
+  if (st) st.innerHTML = "<span class='badge " + bc + "'>" + t.status + "</span>";
+}
+
+// ─── Main flow ────────────────────────────────────────────────────────────────
+async function runRefresh(preview) {
+  if (running) return;
+  const doc = getSelectedDoc();
+  if (!doc) { alert("Please select a Numbers document first."); return; }
+  const key = getKey();
+  if (!key || key === "YOUR_API_KEY_HERE") { openSettings(); return; }
+
+  running = true;
+  stopped = false;
+  setBtns(true);
+  // Add a separator rather than clearing — preserves previous run log
+  const logEl = document.getElementById("log");
+  if (logEl.children.length > 0) {
+    const sep = document.createElement("div");
+    sep.style.cssText = "border-top:1px solid var(--border);margin:8px 0;";
+    logEl.appendChild(sep);
+    logEl.style.display = "block";
+  }
+  setProg(0);
+  tokenLog.length = 0;
+  recentTokens.length = 0;
+  tokenEstimate = 1300;
+  setStatus(preview ? "Preview — no writes" : "Running...");
+  log(preview ? "Preview mode — Numbers will NOT be updated." : "Starting full refresh...", "lsec");
+
+  let tickers;
+  try { tickers = await readPortfolio(); }
+  catch(e) {
+    log("Error reading portfolio: " + e.message, "ler");
+    setStatus("Failed — see log");
+    running = false; setBtns(false); return;
+  }
+
+  log("Found " + tickers.length + " tickers across all Portfolio sheets", "lok");
+  if (!preview) {
+    try { await nbInit(); } catch(e) { log("NumBridge re-init warning: " + e.message, "lwarn"); }
+  }
+  setStats(tickers.length, 0, 0, 0);
+  renderRows(tickers);
+
+  const months = getRollingMonths();
+  let updated = 0, skipped = 0, errors = 0;
+  const today = new Date(); today.setHours(0,0,0,0);
+  const firstOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+  const forceFetch = document.getElementById("force-fetch").checked;
+
+  // ── Step 1: classify — current (skip) vs needs fetch ──────────────────────
+  const isCusipLocal = sym =>
+    /^\d{9}[A-Z]\d$/.test(sym) ||
+    /^\d{6}[A-Z]{2}\d$/.test(sym) ||
+    /^\d+[A-Z]+\d+$/.test(sym) && sym.length >= 8;
+
+  // Cache of fetch results keyed by symbol — shared across all sheets
+  const fetchCache = {};
+
+  const toFetch = [];
+  for (const t of tickers) {
+    // T-Bills and CUSIPs have no dividends — skip
+    if (isCusipLocal(t.symbol)) {
+      t.status = "current"; updated++;
+      log(t.symbol + ": T-Bill — skipping", "li");
+      continue;
+    }
+    const existingPay   = t.payDate   ? new Date(t.payDate)   : null;
+    const existingExDiv = t.exDivDate ? new Date(t.exDivDate) : null;
+    const payStillValid = existingPay   && !isNaN(existingPay)   && existingPay >= firstOfMonth;
+    const exDivInFuture = existingExDiv && !isNaN(existingExDiv) && existingExDiv >= today;
+    if (!forceFetch && (payStillValid || exDivInFuture)) {
+      t.newExDiv   = t.exDivDate;
+      t.newPayDate = t.payDate;
+      t.status = "current"; updated++;
+      const reason = exDivInFuture ? "ex-div " + t.exDivDate + " not yet passed" : "pay date " + t.payDate + " still current";
+      log(t.symbol + " [" + sheetLabel(t.sheet) + "]: " + reason + " — skipping fetch", "li");
+    } else {
+      t.status = "working";
+      toFetch.push(t);
+    }
+  }
+  tickers.forEach(t => updateRow(t, months));
+  setStats(tickers.length, updated, skipped, errors);
+  setProg(20);
+
+  // ── Step 2: fetch each ticker ──────────────────────────────────────────────
+  if (toFetch.length > 0) {
+    // Group by symbol — fetch once, apply to all sheets that hold the same symbol
+    const bySymbol = {};
+    for (const t of toFetch) {
+      if (!bySymbol[t.symbol]) bySymbol[t.symbol] = [];
+      bySymbol[t.symbol].push(t);
+    }
+    const uniqueSymbols = Object.keys(bySymbol);
+    log("Fetching dates for " + uniqueSymbols.length + " unique ticker(s) across " +
+        toFetch.length + " rows...", "lsec");
+    for (let i = 0; i < uniqueSymbols.length; i++) {
+      if (stopped) {
+        log("Stopped by user after " + i + " symbols.", "lwarn");
+        break;
+      }
+      const sym      = uniqueSymbols[i];
+      const rows     = bySymbol[sym];  // all ticker rows for this symbol (may span sheets)
+      const firstRow = rows[0];        // use first row's existing dates for staleness check
+
+      setProg(Math.round(20 + (i / uniqueSymbols.length) * 60));
+      setStatus("Fetching " + sym + " (" + (i + 1) + "/" + uniqueSymbols.length + ")...");
+      const sheetLabels = [...new Set(rows.map(t => sheetLabel(t.sheet)))].join(", ");
+      log("Fetching " + sym + " [" + sheetLabels + "]...");
+
+      // Helper: apply a resolved result to a single ticker row and write it
+      const applyResult = async (t, ex_div, pay_date, ann_div_per_share, divs_per_year, source) => {
+        const fetchedPayD   = pay_date  ? new Date(pay_date)  : null;
+        const fetchedExD    = ex_div    ? new Date(ex_div)    : null;
+        const fetchedPayOk  = fetchedPayD  && !isNaN(fetchedPayD)  && fetchedPayD  >= firstOfMonth;
+        const fetchedExOk   = fetchedExD   && !isNaN(fetchedExD)   && fetchedExD   >= today;
+        const existingPayD  = t.payDate   ? new Date(t.payDate)   : null;
+        const existingExD   = t.exDivDate ? new Date(t.exDivDate) : null;
+        const existingPayOk = existingPayD && !isNaN(existingPayD) && existingPayD >= firstOfMonth;
+        const existingExOk  = existingExD  && !isNaN(existingExD)  && existingExD  >= today;
+
+        if (!ex_div && !pay_date && !t.payDate && !t.exDivDate && !ann_div_per_share) {
+          t.status = "skipped"; skipped++;
+          log(sym + " [" + sheetLabel(t.sheet) + "]: no data — skipping", "lwarn");
+        } else if (!ex_div && !pay_date && !t.payDate && !t.exDivDate) {
+          t.newAnnDiv = ann_div_per_share;
+          t.newDivsPy = divs_per_year;
+          t.status = "updated"; updated++;
+          log(sym + " [" + sheetLabel(t.sheet) + "]: writing ann_div=$" + (ann_div_per_share||"–"), "lwarn");
+          if (!preview) {
+            try { await writeTicker(t, months); }
+            catch(e) { log(sym + " [" + sheetLabel(t.sheet) + "]: write error — " + e.message, "ler"); }
+          }
+        } else if (!fetchedPayOk && !fetchedExOk) {
+          if (existingPayOk || existingExOk) {
+            t.newExDiv = t.exDivDate; t.newPayDate = t.payDate;
+            t.newAnnDiv = ann_div_per_share; t.newDivsPy = divs_per_year;
+            t.status = "updated"; updated++;
+            log(sym + " [" + sheetLabel(t.sheet) + "]: stale fetch — keeping existing dates", "lwarn");
+            if (!preview) {
+              try { await writeTicker(t, months); }
+              catch(e) { log(sym + " [" + sheetLabel(t.sheet) + "]: write error — " + e.message, "ler"); }
+            }
+          } else {
+            t.status = "skipped"; skipped++;
+            log(sym + " [" + sheetLabel(t.sheet) + "]: stale — skipping", "lwarn");
+          }
+        } else {
+          t.newExDiv   = fetchedExOk  ? ex_div   : (existingExOk  ? t.exDivDate : ex_div);
+          t.newPayDate = fetchedPayOk ? pay_date : (existingPayOk ? t.payDate   : pay_date);
+          t.newAnnDiv  = ann_div_per_share;
+          t.newDivsPy  = divs_per_year;
+          t.status = "updated"; updated++;
+          log(sym + " [" + sheetLabel(t.sheet) + "] [" + (source||"?") + "]: ex-div=" +
+              (t.newExDiv||"–") + " pay=" + (t.newPayDate||"–") +
+              (ann_div_per_share ? " ann=$" + ann_div_per_share : "") +
+              (divs_per_year ? " freq=" + divs_per_year + "x" : ""), "lok");
+          if (!preview) {
+            try { await writeTicker(t, months); log(sym + " → " + t.sheet + " ✓", "lok"); }
+            catch(e) { log(sym + " [" + sheetLabel(t.sheet) + "]: write error — " + e.message, "ler"); }
+          }
+        }
+        updateRow(t, months);
+        setStats(tickers.length, updated, skipped, errors);
+      };
+
+      try {
+        const result = await fetchDivDates(sym);
+        const { ex_div, pay_date, ann_div_per_share, divs_per_year, source } = result;
+
+        // Apply this result to ALL rows for this symbol across all sheets
+        for (const t of rows) {
+          await applyResult(t, ex_div, pay_date, ann_div_per_share, divs_per_year, source);
+        }
+        if (rows.length > 1) {
+          log(sym + ": applied to " + rows.length + " rows across sheets", "li");
+        }
+      } catch(e) {
+        for (const t of rows) { t.status = "error"; errors++; }
+        log(sym + " ERROR: " + e.message, "ler");
+        rows.forEach(t => updateRow(t, months));
+        setStats(tickers.length, updated, skipped, errors);
+      }
+    }
+  }
+
+  setProg(88);
+
+  // Write back "current" tickers — month amounts still need updating
+  if (!preview) {
+    const currentTickers = tickers.filter(t =>
+      t.status === "current" &&
+      !isCusipLocal(t.symbol) &&          // skip T-Bills
+      parseNum(t.annDivPerShare) > 0      // skip anything with no dividend
+    );
+    if (currentTickers.length > 0) {
+      setStatus("Writing current tickers to Numbers...");
+      log("Writing " + currentTickers.length + " current tickers...", "lsec");
+      for (const t of currentTickers) {
+        try {
+          await writeTicker(t, months);
+          log(t.symbol + ": written to " + t.sheet + " ✓", "lok");
+        } catch(e) {
+          log(t.symbol + ": write error — " + e.message, "ler");
+        }
+      }
+    }
+  }
+
+  // ── Sort all Portfolio sheets by pay date ──────────────────────────────────
+  if (!preview && !stopped) {
+    setProg(95);
+    setStatus("Sorting by pay date...");
+    log("Sorting Portfolio sheets by pay date...", "lsec");
+    try {
+      const sheets = await getPortfolioSheets(doc);
+      for (const sheet of sheets) {
+        const colMap = await readColMap(doc, sheet, "My Portfolio");
+        if (colMap.PAY_DATE < 0) { log("Sheet " + sheet + ": no Pay Date column — skipping sort", "lwarn"); continue; }
+        await nbTool("sort_table", {
+          document:    doc,
+          sheet:       sheet,
+          table:       "My Portfolio",
+          sort_column: colMap.PAY_DATE + 1,
+          ascending:   true
+        });
+        log("Sorted " + sheet + " ✓", "lok");
+      }
+    } catch(e) {
+      log("Sort error: " + e.message, "ler");
+    }
+  }
+
+  setProg(100);
+  setStatus(stopped
+    ? "Stopped — " + updated + " updated, " + skipped + " skipped, " + errors + " errors"
+    : preview
+      ? "Preview done — " + updated + " found, " + skipped + " skipped"
+      : "Done — " + updated + " rows written to Numbers");
+  log(preview
+    ? "Preview complete. Click 'Refresh dividend dates' to write to Numbers."
+    : "All done. " + updated + " updated, " + skipped + " skipped, " + errors + " errors.", "lok");
+
+  running = false; setBtns(false);
+}
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+checkBanner();
+reloadDocuments();
+</script>
+</body>
+</html>
