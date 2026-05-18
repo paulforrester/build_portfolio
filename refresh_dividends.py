@@ -37,6 +37,12 @@ try:
 except ImportError:
     sys.exit("ERROR: requests is required.  pip install requests")
 
+try:
+    import yfinance as yf  # Yahoo source — pip install yfinance
+    _YF_AVAILABLE = True
+except ImportError:
+    _YF_AVAILABLE = False
+
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 MODEL        = "claude-sonnet-4-6"
@@ -234,11 +240,19 @@ for (let r = 1; r < nRows; r++) {{  // 0-based: row index 0 = header, skip it
 JSON.stringify(rows);
 """
     raw_rows = json.loads(run_jxa_file(script))
-    # Filter out CUSIPs and money markets
-    return [
-        r for r in raw_rows
-        if not is_cusip(r["symbol"]) and r["symbol"].upper() not in MONEY_MARKETS
-    ]
+    # Filter out CUSIPs and money markets (display symbols may be "SPAXX - Account Name")
+    def _skip(sym: str) -> bool:
+        if is_cusip(sym):
+            return True
+        su = sym.upper()
+        if su in MONEY_MARKETS:
+            return True
+        for mm in MONEY_MARKETS:
+            if su.startswith(mm + " ") or su.startswith(mm + "-"):
+                return True
+        return False
+
+    return [r for r in raw_rows if not _skip(r["symbol"])]
 
 
 def write_ticker(doc_name: str, sheet_name: str, row: int,
@@ -591,43 +605,57 @@ def fetch_from_fmp(ticker: str, fmp_key: str) -> Optional[dict]:
         return None
 
 
-# ── Source 3: Yahoo Finance ────────────────────────────────────────────────────
+# ── Source 3: Yahoo Finance (via yfinance) ────────────────────────────────────
+# yfinance handles crumb/cookie authentication that the raw API now requires.
+# Falls through silently when yfinance is not installed.
 
 def fetch_from_yahoo(ticker: str) -> Optional[dict]:
-    hdrs = {"Accept": "application/json",
-            "User-Agent": "Mozilla/5.0 (compatible; dividend-refresher/1.0)"}
-    modules = "summaryDetail,calendarEvents"
-    try:
-        url  = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
-        resp = requests.get(url, params={"modules": modules, "corsDomain": "finance.yahoo.com"},
-                            headers=hdrs, timeout=15)
-        if not resp.ok:
-            url2  = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
-            resp  = requests.get(url2, params={"modules": modules}, headers=hdrs, timeout=15)
-            if not resp.ok:
-                return None
-        return _parse_yahoo(ticker, resp.json())
-    except Exception as e:
-        print(f"  {ticker} [Yahoo]: {e}")
+    if not _YF_AVAILABLE:
         return None
-
-
-def _parse_yahoo(ticker: str, data: dict) -> Optional[dict]:
     try:
-        result = ((data.get("quoteSummary") or {}).get("result") or [])
-        if not result:
-            return None
-        sd  = result[0].get("summaryDetail") or {}
-        cal = result[0].get("calendarEvents") or {}
+        t    = yf.Ticker(ticker)
+        info = t.info or {}
 
-        ann_div   = (sd.get("dividendRate") or {}).get("raw") or None
-        trail_ann = (sd.get("trailingAnnualDividendRate") or {}).get("raw")
-        freq      = infer_frequency(ann_div, trail_ann / 4) if ann_div and trail_ann else 4
+        # Forward annual div rate; fall back to trailing if not available
+        ann_div = (info.get("dividendRate")
+                   or info.get("trailingAnnualDividendRate")
+                   or None)
 
-        ex_ts  = (sd.get("exDividendDate") or {}).get("raw")
-        pay_ts = (cal.get("dividendDate") or {}).get("raw")
-        ex_div   = norm_date(ex_ts)  if ex_ts  else None
-        pay_date = norm_date(pay_ts) if pay_ts else None
+        # Calendar gives both dates as date objects (most accurate)
+        ex_div   = None
+        pay_date = None
+        try:
+            cal      = t.calendar or {}
+            ex_d     = cal.get("Ex-Dividend Date")
+            pay_d    = cal.get("Dividend Date")
+            ex_div   = str(ex_d)  if ex_d  else None
+            pay_date = str(pay_d) if pay_d else None
+        except Exception:
+            pass
+
+        # Fallback ex-div from info (Unix timestamp)
+        if not ex_div:
+            ex_ts  = info.get("exDividendDate")
+            ex_div = norm_date(ex_ts) if ex_ts else None
+
+        # Infer frequency from dividend history; also compute annual if still missing
+        freq = 4
+        try:
+            divs = t.dividends
+            if len(divs) >= 2:
+                last_amt = float(divs.iloc[-1])
+                if ann_div:
+                    freq = infer_frequency(ann_div, last_amt)
+                else:
+                    # Sum last 12 months of payments
+                    cutoff = (date.today() - timedelta(days=365)).isoformat()
+                    recent = [float(v) for d, v in divs.items()
+                              if str(d.date()) >= cutoff]
+                    if recent:
+                        ann_div = round(sum(recent), 4)
+                        freq    = infer_frequency(ann_div, last_amt)
+        except Exception:
+            pass
 
         if not ann_div and not ex_div:
             return None
@@ -635,7 +663,7 @@ def _parse_yahoo(ticker: str, data: dict) -> Optional[dict]:
                 "ann_div_per_share": ann_div, "divs_per_year": freq,
                 "source": "yahoo"}
     except Exception as e:
-        print(f"  {ticker} [Yahoo parse]: {e}")
+        print(f"  {ticker} [Yahoo]: {e}")
         return None
 
 
@@ -856,6 +884,9 @@ def main():
     _token_estimate = 1300.0
 
     doc_name = args.doc
+    # Numbers stores document names with the .numbers extension internally
+    if not doc_name.lower().endswith(".numbers"):
+        doc_name += ".numbers"
     print(f"Reading portfolio sheets from: {doc_name}")
     try:
         sheets = get_portfolio_sheets(doc_name)
