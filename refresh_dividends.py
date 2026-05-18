@@ -316,12 +316,14 @@ const t = tbl[0];
 
 def sort_sheet(doc_name: str, sheet_name: str, pay_date_col: int) -> None:
     """Sort My Portfolio by pay date (1-based col) ascending via AppleScript."""
+    # Numbers AppleScript "sort by column N" sorts ascending by default.
+    # "in order ascending" triggers a -2741 syntax error in this context.
     script = f"""
 tell application "Numbers"
     tell document {json.dumps(doc_name)}
         tell sheet {json.dumps(sheet_name)}
             tell table {json.dumps(TABLE)}
-                sort by column {pay_date_col} in order ascending
+                sort by column {pay_date_col}
             end tell
         end tell
     end tell
