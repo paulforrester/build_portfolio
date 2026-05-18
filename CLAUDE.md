@@ -414,24 +414,14 @@ scripted use.**
 
 ### Running
 
+`--doc` is required. Use the document name as shown in the Numbers title bar — no `.numbers` suffix.
+
 ```bash
-# Basic — auto-selects open Numbers document with Portfolio sheets
-python3 refresh_dividends.py
-
-# Specify document explicitly
-python3 refresh_dividends.py --doc "Portfolio May 2026 (13).numbers"
-
-# Force refresh all tickers even if dates are current
-python3 refresh_dividends.py --force
-
-# Preview only — show what would be fetched/written without changes
-python3 refresh_dividends.py --preview
-
-# Skip Claude API fallback (faster, free-tier sources only)
-python3 refresh_dividends.py --no-claude
-
-# Recalculate monthly amounts only — no API fetching
-python3 refresh_dividends.py --amounts-only
+python3 refresh_dividends.py --doc "Portfolio May 2026"
+python3 refresh_dividends.py --doc "Portfolio May 2026" --force        # re-fetch even if dates current
+python3 refresh_dividends.py --doc "Portfolio May 2026" --preview      # fetch but don't write
+python3 refresh_dividends.py --doc "Portfolio May 2026" --no-claude    # skip Claude fallback
+python3 refresh_dividends.py --doc "Portfolio May 2026" --amounts-only # recalc month amounts only
 ```
 
 ### API Keys
@@ -444,7 +434,7 @@ Keys are read in this priority order:
 {
   "av_key": "...",
   "fmp_key": "...",
-  "anthropic_key": "..."
+  "anthropic_api_key": "..."
 }
 ```
 
