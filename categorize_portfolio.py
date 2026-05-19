@@ -15,6 +15,8 @@ API keys read from env vars or ~/.dividend_refresher/config.json:
 """
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import re
@@ -29,6 +31,20 @@ try:
     import requests
 except ImportError:
     sys.exit("ERROR: requests is required.  pip install requests")
+
+try:
+    import yfinance as yf
+    _YF_AVAILABLE = True
+except ImportError:
+    _YF_AVAILABLE = False
+
+
+@contextlib.contextmanager
+def _suppress_yf():
+    """Suppress stdout/stderr during yfinance property access (HTTP error prints)."""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        yield
 
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -76,6 +92,21 @@ FMP_SECTOR_MAP = {
     "Energy":                "Energy",
     "Real Estate":           "Real Estate",
     "Utilities":             "Utilities",
+}
+
+# yfinance funds_data.sector_weightings uses lowercase underscore keys.
+YF_SECTOR_MAP = {
+    "technology":             "Information Technology",
+    "healthcare":             "Health Care",
+    "financial_services":     "Financials",
+    "consumer_cyclical":      "Consumer Discretionary",
+    "consumer_defensive":     "Consumer Staples",
+    "basic_materials":        "Materials",
+    "communication_services": "Communication Services",
+    "industrials":            "Industrials",
+    "energy":                 "Energy",
+    "realestate":             "Real Estate",
+    "utilities":              "Utilities",
 }
 
 # Hardcoded sector/cap breakdowns for common ETFs.
@@ -428,11 +459,37 @@ def _get_stock_profile(symbol: str, fmp_key: str) -> Optional[dict]:
     return result
 
 
+def _yf_etf_sectors(etf_symbol: str) -> Optional[dict]:
+    """Return normalized GICS sector weights from yfinance funds_data, or None."""
+    if not _YF_AVAILABLE:
+        return None
+    try:
+        with _suppress_yf():
+            ticker = yf.Ticker(etf_symbol)
+            fd = ticker.funds_data
+            raw = fd.sector_weightings if fd is not None else None
+        if not raw or not isinstance(raw, dict):
+            return None
+        mapped: dict = {}
+        for yf_key, weight in raw.items():
+            if weight and weight > 0:
+                gics = YF_SECTOR_MAP.get(yf_key, "Other")
+                mapped[gics] = mapped.get(gics, 0) + float(weight)
+        return _normalize(mapped) if mapped else None
+    except Exception:
+        return None
+
+
 def get_etf_breakdown(etf_symbol: str, fmp_key: str) -> tuple:
     """Return (sector_weights, cap_weights) for an ETF based on top-25 holdings.
 
-    Tries FMP /etf-holder first; falls back to ETF_HARDCODED for known ETFs
-    (FMP's free stable tier does not expose the etf-holder endpoint).
+    Priority:
+      1. FMP /etf-holder (live; requires paid tier)
+      2. yfinance funds_data.sector_weightings (live; free)
+      3. ETF_HARDCODED (static Q1-2026 approximations)
+
+    Cap tiers: yfinance has no cap data, so ETF_HARDCODED cap weights are always
+    used when yfinance is the sector source.
     """
     if etf_symbol in _etf_cache:
         return _etf_cache[etf_symbol]
@@ -440,13 +497,25 @@ def get_etf_breakdown(etf_symbol: str, fmp_key: str) -> tuple:
     print(f"  ETF {etf_symbol}: fetching top-25 holdings…")
     holders = _fmp_get(f"/etf-holder/{etf_symbol}", fmp_key)
     if not holders or not isinstance(holders, list):
-        # FMP etf-holder unavailable on free tier — use hardcoded breakdown
-        if etf_symbol in ETF_HARDCODED:
+        # Try yfinance for live sector data
+        yf_sectors = _yf_etf_sectors(etf_symbol)
+        if yf_sectors:
+            # Cap tiers: use ETF_HARDCODED if available, else Other
+            if etf_symbol in ETF_HARDCODED:
+                _, cw_raw = ETF_HARDCODED[etf_symbol]
+                cap_w = _normalize(cw_raw)
+            else:
+                cap_w = {"Other": 1.0}
+            result = (yf_sectors, cap_w)
+            print(f"    {etf_symbol}: live sector data from yfinance "
+                  f"({len(yf_sectors)} sectors), cap from "
+                  f"{'hardcoded' if etf_symbol in ETF_HARDCODED else 'Other'}")
+        elif etf_symbol in ETF_HARDCODED:
             sw_raw, cw_raw = ETF_HARDCODED[etf_symbol]
             result = (_normalize(sw_raw), _normalize(cw_raw))
-            print(f"    {etf_symbol}: using hardcoded breakdown (FMP holder unavailable)")
+            print(f"    {etf_symbol}: using hardcoded breakdown (FMP + yfinance unavailable)")
         else:
-            print(f"    {etf_symbol}: no holder data and no hardcoded breakdown — Other/Other")
+            print(f"    {etf_symbol}: no holder data, no yfinance data, no hardcoded — Other/Other")
             result = ({"Other": 1.0}, {"Other": 1.0})
         _etf_cache[etf_symbol] = result
         return result
