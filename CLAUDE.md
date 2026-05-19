@@ -483,3 +483,66 @@ unconditionally.
 - Stale-date fallback behaviour (keep existing sheet dates if fetch returns stale)
 - Cross-sheet dedup logic
 - Monthly amount calculation including noon-UTC timezone fix
+
+---
+
+## categorize_portfolio.py
+
+Classifies all portfolio positions by GICS sector and market cap tier, writing two
+summary tables (`Sector Breakdown`, `Cap Breakdown`) to the Summary sheet.
+
+Uses FMP API for individual stock profiles and ETF holdings (top-25 holdings per
+ETF, weighted). 401k funds without tickers use hardcoded classification by fund
+description keyword. Requires `FMP_KEY`. Uses same config file as
+`refresh_dividends.py` (`~/.dividend_refresher/config.json`).
+
+**Requires NumBridge running** for writing tables. If NumBridge is unavailable the
+script degrades gracefully: breakdown is printed to stdout, write is skipped.
+
+```bash
+python3 categorize_portfolio.py
+python3 categorize_portfolio.py --doc "Portfolio May 2026 (13).numbers"
+python3 categorize_portfolio.py --preview   # print only, don't write to Numbers
+```
+
+### ETF classification
+
+Calls `/etf-holder/{symbol}` for the top-25 holdings by weight, then
+`/profile/{holding}` for each to get `sector` and `mktCap`. Results are cached
+in memory per run. Budget: ~26 FMP calls per unique ETF symbol (1 holder + 25
+profiles). Individual stock profiles are also cached — QQQM appearing in both
+Portfolio and Portfolio-IRA triggers only one set of API calls.
+
+Known ETF list (pre-flagged without needing a profile call): `KNOWN_ETFS` constant.
+Any symbol FMP returns with `isEtf: true` is also classified as ETF regardless.
+
+### Market cap tiers
+
+| Tier | Market Cap |
+|------|-----------|
+| Mega-Cap | > $200B |
+| Large-Cap | $10B–$200B |
+| Mid-Cap | $2B–$10B |
+| Small-Cap | $250M–$2B |
+| Micro-Cap | < $250M |
+
+### 401k fund classification
+
+`FUND_401K_CLASSIFICATIONS` dict maps lowercase substrings (e.g., `"s&p 500"`,
+`"2030"`, `"bond"`, `"international"`) to `(sector_weights, cap_weights)` tuples.
+Weights are normalized to 1.0 at runtime. No match → `{"Other": 1.0}`.
+
+### Table placement (NumBridge)
+
+Tables are created on the `Summary` sheet using `add_table`, then positioned with
+`set_table_layout` relative to the existing `Portfolio Summary` table (to its
+right). `Sector Breakdown` goes at `(summary.x + summary.width + 40, summary.y)`;
+`Cap Breakdown` is placed below it. Column 2 formatted as `currency`, column 3 as
+`percentage` via `set_column_format`. Existing tables with the same names are
+removed and recreated on each run.
+
+### "Other" category
+
+Holds unclassified portions: ETF holdings outside the top-25, profiles not found
+in FMP, and any position the script could not classify. Acceptable at < ~15% of
+total portfolio value.
