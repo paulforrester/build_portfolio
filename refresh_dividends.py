@@ -392,6 +392,14 @@ def infer_frequency(annual_rate: float, single_payment: float) -> int:
     return 4
 
 
+def _gap_to_freq(avg_gap_days: float) -> int:
+    """Infer dividend frequency from average days between ex-div dates."""
+    if   avg_gap_days < 45:  return 12
+    elif avg_gap_days < 120: return 4
+    elif avg_gap_days < 270: return 2
+    else:                    return 1
+
+
 def result_usable(r: Optional[dict]) -> bool:
     if not r:
         return False
@@ -664,23 +672,54 @@ def fetch_from_yahoo(ticker: str) -> Optional[dict]:
             if pay_date < stale_cutoff:
                 pay_date = None
 
-        # Infer frequency from dividend history; also compute annual if still missing
-        freq = 4
+        # Clear recently-stale calendar dates so history estimation can run.
+        # ETFs often have no announced future date yet — we'll estimate from history below.
+        today_str = date.today().isoformat()
+        fom_str   = date.today().replace(day=1).isoformat()
+        if ex_div   and ex_div   < today_str: ex_div   = None
+        if pay_date and pay_date < fom_str:   pay_date = None
+
+        # History-based frequency, annual, and next-date estimation
+        freq      = 4
+        estimated = False
         try:
             with _suppress_yf():
                 divs = t.dividends
             if len(divs) >= 2:
-                last_amt = float(divs.iloc[-1])
-                if ann_div:
-                    freq = infer_frequency(ann_div, last_amt)
+                last_amt  = float(divs.iloc[-1])
+                last_ex_d = divs.index[-1].date()
+
+                # Gap-based frequency using the MOST RECENT entries, not oldest.
+                # divs is sorted ascending (oldest first), so we slice from the end.
+                gap_sample    = min(6, len(divs))   # 6 entries → 5 gaps
+                recent_slice  = divs.iloc[-gap_sample:]
+                gaps = [(recent_slice.index[i].date() - recent_slice.index[i-1].date()).days
+                        for i in range(1, len(recent_slice))]
+                avg_gap = sum(gaps) / len(gaps)
+                freq_from_gap = _gap_to_freq(avg_gap)
+
+                if ann_div and last_amt > 0:
+                    freq_inferred = infer_frequency(ann_div, last_amt)
+                    # Only trust infer_frequency when the ratio clearly lands in a bracket;
+                    # fall back to gap-based otherwise.
+                    freq = freq_inferred if freq_inferred != 4 or freq_from_gap == 4 else freq_from_gap
                 else:
-                    # Sum last 12 months of payments
+                    freq = freq_from_gap
+                    # Compute annual from last 12 months of history
                     cutoff = (date.today() - timedelta(days=365)).isoformat()
                     recent = [float(v) for d, v in divs.items()
                               if str(d.date()) >= cutoff]
                     if recent:
                         ann_div = round(sum(recent), 4)
-                        freq    = infer_frequency(ann_div, last_amt)
+
+                # Estimate next dates from history when not yet announced
+                if not ex_div and not pay_date and ann_div:
+                    est_ex  = last_ex_d + timedelta(days=round(avg_gap))
+                    est_pay = est_ex + timedelta(days=14)
+                    if est_pay >= date.today():
+                        ex_div    = str(est_ex)
+                        pay_date  = str(est_pay)
+                        estimated = True
         except Exception:
             pass
 
@@ -688,7 +727,7 @@ def fetch_from_yahoo(ticker: str) -> Optional[dict]:
             return None
         return {"ex_div": ex_div, "pay_date": pay_date,
                 "ann_div_per_share": ann_div, "divs_per_year": freq,
-                "source": "yahoo"}
+                "source": "yahoo/est" if estimated else "yahoo"}
     except Exception as e:
         print(f"  {ticker} [Yahoo]: {e}")
         return None
@@ -771,6 +810,9 @@ def fetch_from_claude(ticker: str, api_key: str) -> Optional[dict]:
 # ── Cascade ────────────────────────────────────────────────────────────────────
 
 def fetch_div_dates(ticker: str, config: dict, no_claude: bool = False) -> dict:
+    today_str = date.today().isoformat()
+    fom_str   = date.today().replace(day=1).isoformat()
+
     sources = [
         ("AV",    lambda: fetch_from_alpha_vantage(ticker, config.get("av_key", ""))),
         ("FMP",   lambda: fetch_from_fmp(ticker, config.get("fmp_key", ""))),
@@ -778,6 +820,9 @@ def fetch_div_dates(ticker: str, config: dict, no_claude: bool = False) -> dict:
     ]
     if not no_claude:
         sources.append(("Claude", lambda: fetch_from_claude(ticker, config.get("anthropic_api_key", ""))))
+
+    # Saved when a source returns ann_div but no fresh dates — used if nothing better found
+    ann_div_fallback: Optional[dict] = None
 
     for name, fn in sources:
         result = None
@@ -789,15 +834,32 @@ def fetch_div_dates(ticker: str, config: dict, no_claude: bool = False) -> dict:
                 raise
             continue
         if result and result_usable(result):
-            print(f"  {ticker} [{name}]: "
-                  f"ex-div={result.get('ex_div','–')} pay={result.get('pay_date','–')}"
-                  + (f" ann=${result['ann_div_per_share']}" if result.get("ann_div_per_share") else "")
-                  + (f" freq={result['divs_per_year']}x"   if result.get("divs_per_year")     else ""))
-            return result
-        if result:
+            ex_fresh  = result.get("ex_div")   and result["ex_div"]   >= today_str
+            pay_fresh = result.get("pay_date") and result["pay_date"]  >= fom_str
+            if ex_fresh or pay_fresh:
+                print(f"  {ticker} [{name}]: "
+                      f"ex-div={result.get('ex_div','–')} pay={result.get('pay_date','–')}"
+                      + (f" ann=${result['ann_div_per_share']}" if result.get("ann_div_per_share") else "")
+                      + (f" freq={result['divs_per_year']}x"   if result.get("divs_per_year")     else ""))
+                return result
+            # Usable (has ann_div) but no fresh dates — save as fallback, keep searching
+            if ann_div_fallback is None:
+                fallback = dict(result)
+                if fallback.get("ex_div")   and fallback["ex_div"]   < today_str: fallback["ex_div"]   = None
+                if fallback.get("pay_date") and fallback["pay_date"] < fom_str:   fallback["pay_date"] = None
+                ann_div_fallback = fallback
+            print(f"  {ticker} [{name}]: ann_div=${result.get('ann_div_per_share','?')} "
+                  f"but stale/no dates — trying next for fresh dates")
+        elif result:
             print(f"  {ticker} [{name}]: returned data but dates are stale — trying next")
         else:
             print(f"  {ticker} [{name}]: no data — trying next")
+
+    if ann_div_fallback:
+        r = ann_div_fallback
+        print(f"  {ticker}: no fresh dates found — using ann_div fallback "
+              f"(ann=${r.get('ann_div_per_share','?')})")
+        return r
 
     return {"ex_div": None, "pay_date": None,
             "ann_div_per_share": None, "divs_per_year": None, "source": "none"}
@@ -867,8 +929,13 @@ def _write_pos(pos: dict, doc_name: str, months: list, sym: str):
     divs_py  = pos.get("new_divs_py") if pos.get("new_divs_py") is not None else (int(pos.get("divs_per_year") or 0) or 4)
     pay_date = pos.get("new_pay_date") or pos.get("pay_date")
 
+    shares = pos.get("shares")
     month_amounts = compute_month_amounts_from_values(
-        ann_div, divs_py, pay_date, pos.get("shares"), months)
+        ann_div, divs_py, pay_date, shares, months)
+
+    non_null = {k: v for k, v in month_amounts.items() if v is not None}
+    print(f"    ann=${ann_div} freq={divs_py} pay={pay_date} shares={shares}"
+          + (f" → {non_null}" if non_null else " → no monthly amounts"))
 
     data = {
         "new_ann_div":   pos.get("new_ann_div"),
