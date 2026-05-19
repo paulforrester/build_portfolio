@@ -34,7 +34,7 @@ except ImportError:
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 NUMBRIDGE_URL   = "http://127.0.0.1:8765/mcp"
-FMP_BASE        = "https://financialmodelingprep.com/api/v3"
+FMP_BASE        = "https://financialmodelingprep.com/stable"
 PORTFOLIO_TABLE = "My Portfolio"
 SUMMARY_SHEET   = "Summary"
 SUMMARY_TABLE   = "Portfolio Summary"
@@ -61,6 +61,87 @@ CAP_ORDER = [
     "Mega-Cap", "Large-Cap", "Mid-Cap", "Small-Cap", "Micro-Cap",
     "Fixed Income", "Cash", "Other",
 ]
+
+# FMP stable API returns its own sector names, not GICS labels.
+# Map to the GICS names used in SECTOR_ORDER.
+FMP_SECTOR_MAP = {
+    "Technology":            "Information Technology",
+    "Healthcare":            "Health Care",
+    "Financial Services":    "Financials",
+    "Consumer Cyclical":     "Consumer Discretionary",
+    "Consumer Defensive":    "Consumer Staples",
+    "Basic Materials":       "Materials",
+    "Communication Services":"Communication Services",
+    "Industrials":           "Industrials",
+    "Energy":                "Energy",
+    "Real Estate":           "Real Estate",
+    "Utilities":             "Utilities",
+}
+
+# Hardcoded sector/cap breakdowns for common ETFs.
+# Used when FMP's etf-holder endpoint is unavailable (free tier returns 404).
+# Approximate as of 2026-Q1 based on published fund holdings.
+ETF_HARDCODED: dict = {
+    "QQQM": (
+        {"Information Technology": 0.490, "Communication Services": 0.160,
+         "Consumer Discretionary": 0.140, "Health Care": 0.070,
+         "Industrials": 0.065, "Consumer Staples": 0.040,
+         "Financials": 0.020, "Other": 0.015},
+        {"Mega-Cap": 0.695, "Large-Cap": 0.255, "Mid-Cap": 0.050},
+    ),
+    "QQQ": (
+        {"Information Technology": 0.490, "Communication Services": 0.160,
+         "Consumer Discretionary": 0.140, "Health Care": 0.070,
+         "Industrials": 0.065, "Consumer Staples": 0.040,
+         "Financials": 0.020, "Other": 0.015},
+        {"Mega-Cap": 0.695, "Large-Cap": 0.255, "Mid-Cap": 0.050},
+    ),
+    "VTI": (
+        {"Information Technology": 0.320, "Health Care": 0.120,
+         "Financials": 0.130, "Consumer Discretionary": 0.110,
+         "Communication Services": 0.090, "Industrials": 0.090,
+         "Consumer Staples": 0.050, "Energy": 0.030,
+         "Real Estate": 0.030, "Materials": 0.020, "Utilities": 0.010},
+        {"Mega-Cap": 0.450, "Large-Cap": 0.320, "Mid-Cap": 0.140, "Small-Cap": 0.090},
+    ),
+    "VOO": (
+        {"Information Technology": 0.325, "Health Care": 0.120,
+         "Financials": 0.135, "Consumer Discretionary": 0.110,
+         "Communication Services": 0.090, "Industrials": 0.085,
+         "Consumer Staples": 0.060, "Energy": 0.040,
+         "Real Estate": 0.020, "Materials": 0.020, "Utilities": 0.015},
+        {"Mega-Cap": 0.550, "Large-Cap": 0.380, "Mid-Cap": 0.070},
+    ),
+    "VGT": (
+        {"Information Technology": 0.950, "Communication Services": 0.030,
+         "Consumer Discretionary": 0.020},
+        {"Mega-Cap": 0.650, "Large-Cap": 0.300, "Mid-Cap": 0.050},
+    ),
+    "VXUS": (
+        {"Financials": 0.200, "Industrials": 0.150,
+         "Information Technology": 0.140, "Consumer Discretionary": 0.110,
+         "Health Care": 0.100, "Consumer Staples": 0.090,
+         "Materials": 0.070, "Communication Services": 0.040,
+         "Energy": 0.050, "Real Estate": 0.030, "Utilities": 0.020},
+        {"Mega-Cap": 0.300, "Large-Cap": 0.350, "Mid-Cap": 0.200, "Small-Cap": 0.150},
+    ),
+    "SPY": (
+        {"Information Technology": 0.325, "Health Care": 0.120,
+         "Financials": 0.135, "Consumer Discretionary": 0.110,
+         "Communication Services": 0.090, "Industrials": 0.085,
+         "Consumer Staples": 0.060, "Energy": 0.040,
+         "Real Estate": 0.020, "Materials": 0.020, "Utilities": 0.015},
+        {"Mega-Cap": 0.550, "Large-Cap": 0.380, "Mid-Cap": 0.070},
+    ),
+    "IVV": (
+        {"Information Technology": 0.325, "Health Care": 0.120,
+         "Financials": 0.135, "Consumer Discretionary": 0.110,
+         "Communication Services": 0.090, "Industrials": 0.085,
+         "Consumer Staples": 0.060, "Energy": 0.040,
+         "Real Estate": 0.020, "Materials": 0.020, "Utilities": 0.015},
+        {"Mega-Cap": 0.550, "Large-Cap": 0.380, "Mid-Cap": 0.070},
+    ),
+}
 
 # Lowercase substrings matched against fund description for 401k classification.
 # Weights are normalized to 1.0 by _classify_401k().
@@ -259,7 +340,12 @@ _stock_cache: dict = {}
 _etf_cache:   dict = {}
 
 
-def _fmp_get(path: str, fmp_key: str):
+def _fmp_get(path: str, fmp_key: str, **extra_params):
+    """GET {FMP_BASE}{path} with apikey + any extra query params.
+
+    The /stable/profile endpoint uses ?symbol= as a query param, not a path
+    segment, so callers pass symbol=sym as a kwarg.
+    """
     global _fmp_call_count, _fmp_last_call
     if _fmp_call_count >= FMP_QUOTA_WARN:
         print(f"WARNING: FMP quota limit ({FMP_QUOTA_WARN} calls reached). "
@@ -268,21 +354,24 @@ def _fmp_get(path: str, fmp_key: str):
     wait = FMP_RATE_S - (time.time() - _fmp_last_call)
     if wait > 0:
         time.sleep(wait)
-    url = f"{FMP_BASE}{path}"
+    url    = FMP_BASE + path
+    params = {"apikey": fmp_key, **extra_params}
     for attempt in range(3):
         try:
-            resp = requests.get(url, params={"apikey": fmp_key}, timeout=15)
+            resp = requests.get(url, params=params, timeout=15)
             _fmp_last_call   = time.time()
             _fmp_call_count += 1
             if resp.status_code == 429:
-                wait_s = 30
-                print(f"  FMP 429 rate limit — waiting {wait_s}s (attempt {attempt+1}/3)")
-                time.sleep(wait_s)
+                print(f"  FMP 429 rate limit — waiting 30s (attempt {attempt+1}/3)")
+                time.sleep(30)
                 continue
             if not resp.ok:
                 return None
             data = resp.json()
             if isinstance(data, dict) and (data.get("Error Message") or data.get("error")):
+                return None
+            # Empty list means not found, not an error
+            if isinstance(data, list) and len(data) == 0:
                 return None
             return data
         except requests.RequestException as e:
@@ -316,17 +405,23 @@ def _classify_401k(description: str) -> tuple:
     return {"Other": 1.0}, {"Other": 1.0}
 
 
+def _fmp_sector(raw: str) -> str:
+    """Map FMP stable sector name to the GICS name used in SECTOR_ORDER."""
+    return FMP_SECTOR_MAP.get(raw or "", raw or "Other") or "Other"
+
+
 def _get_stock_profile(symbol: str, fmp_key: str) -> Optional[dict]:
     if symbol in _stock_cache:
         return _stock_cache[symbol]
-    data = _fmp_get(f"/profile/{symbol}", fmp_key)
+    # /stable/profile uses ?symbol= query param, not a path segment
+    data = _fmp_get("/profile", fmp_key, symbol=symbol)
     if not data or not isinstance(data, list) or not data[0]:
         _stock_cache[symbol] = None
         return None
     p = data[0]
     result = {
-        "sector": p.get("sector") or "Other",
-        "mktCap": float(p.get("mktCap") or 0),
+        "sector": _fmp_sector(p.get("sector")),
+        "mktCap": float(p.get("marketCap") or 0),   # stable API: marketCap not mktCap
         "isEtf":  bool(p.get("isEtf")),
     }
     _stock_cache[symbol] = result
@@ -334,15 +429,25 @@ def _get_stock_profile(symbol: str, fmp_key: str) -> Optional[dict]:
 
 
 def get_etf_breakdown(etf_symbol: str, fmp_key: str) -> tuple:
-    """Return (sector_weights, cap_weights) for an ETF based on top-25 holdings."""
+    """Return (sector_weights, cap_weights) for an ETF based on top-25 holdings.
+
+    Tries FMP /etf-holder first; falls back to ETF_HARDCODED for known ETFs
+    (FMP's free stable tier does not expose the etf-holder endpoint).
+    """
     if etf_symbol in _etf_cache:
         return _etf_cache[etf_symbol]
 
     print(f"  ETF {etf_symbol}: fetching top-25 holdings…")
     holders = _fmp_get(f"/etf-holder/{etf_symbol}", fmp_key)
     if not holders or not isinstance(holders, list):
-        print(f"    {etf_symbol}: no holder data — Other/Other")
-        result = ({"Other": 1.0}, {"Other": 1.0})
+        # FMP etf-holder unavailable on free tier — use hardcoded breakdown
+        if etf_symbol in ETF_HARDCODED:
+            sw_raw, cw_raw = ETF_HARDCODED[etf_symbol]
+            result = (_normalize(sw_raw), _normalize(cw_raw))
+            print(f"    {etf_symbol}: using hardcoded breakdown (FMP holder unavailable)")
+        else:
+            print(f"    {etf_symbol}: no holder data and no hardcoded breakdown — Other/Other")
+            result = ({"Other": 1.0}, {"Other": 1.0})
         _etf_cache[etf_symbol] = result
         return result
 
@@ -370,7 +475,7 @@ def get_etf_breakdown(etf_symbol: str, fmp_key: str) -> tuple:
             cap_w["Other"]    = cap_w.get("Other", 0) + weight
             missing += 1
             continue
-        sector = profile.get("sector") or "Other"
+        sector = profile.get("sector") or "Other"   # already mapped by _get_stock_profile
         tier   = _mktcap_tier(profile["mktCap"]) if profile.get("mktCap", 0) > 0 else "Other"
         sector_w[sector] = sector_w.get(sector, 0) + weight
         cap_w[tier]      = cap_w.get(tier, 0) + weight
