@@ -51,6 +51,7 @@ def _suppress_yf():
 
 NUMBRIDGE_URL   = "http://127.0.0.1:8765/mcp"
 FMP_BASE        = "https://financialmodelingprep.com/stable"
+FMP_V3_BASE     = "https://financialmodelingprep.com/api/v3"  # etf-holder only on v3
 PORTFOLIO_TABLE = "My Portfolio"
 SUMMARY_SHEET   = "Summary"
 SUMMARY_TABLE   = "Portfolio Summary"
@@ -323,24 +324,36 @@ class NumBridgeClient:
     """Thin JSON-RPC wrapper around the NumBridge MCP HTTP endpoint."""
 
     def __init__(self, url: str = NUMBRIDGE_URL):
-        self.url       = url
-        self._sess     = requests.Session()
-        self._msg_id   = 0
-        self._calls    = 0
-        self.available = False
+        self.url        = url
+        self._sess      = requests.Session()
+        self._msg_id    = 0
+        self._calls     = 0
+        self.available  = False
+        self._init_error = ""
         self._init()
 
     def _init(self):
         try:
             self._msg_id += 1
             resp = self._sess.post(self.url, json={
-                "jsonrpc": "2.0", "method": "initialize",
-                "params": {}, "id": self._msg_id,
+                "jsonrpc": "2.0",
+                "method":  "initialize",
+                "params":  {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities":    {},
+                    "clientInfo":      {"name": "categorize_portfolio", "version": "1.0"},
+                },
+                "id": self._msg_id,
             }, timeout=5)
             resp.raise_for_status()
+            data = resp.json()
+            if "error" in data:
+                raise RuntimeError(f"MCP init error: {data['error']}")
             self.available = True
-        except Exception:
+        except Exception as e:
             self.available = False
+            # Store the error so we can report it
+            self._init_error = str(e)
 
     def call(self, tool: str, **kwargs) -> str:
         if not self.available:
@@ -372,11 +385,16 @@ _etf_cache:   dict = {}
 
 
 def _fmp_get(path: str, fmp_key: str, **extra_params):
-    """GET {FMP_BASE}{path} with apikey + any extra query params.
+    """GET {FMP_BASE}{path} — uses /stable endpoint."""
+    return _fmp_get_url(FMP_BASE + path, fmp_key, **extra_params)
 
-    The /stable/profile endpoint uses ?symbol= as a query param, not a path
-    segment, so callers pass symbol=sym as a kwarg.
-    """
+
+def _fmp_get_v3(path: str, fmp_key: str, **extra_params):
+    """GET {FMP_V3_BASE}{path} — uses /api/v3 endpoint (etf-holder etc.)."""
+    return _fmp_get_url(FMP_V3_BASE + path, fmp_key, **extra_params)
+
+
+def _fmp_get_url(url: str, fmp_key: str, **extra_params):
     global _fmp_call_count, _fmp_last_call
     if _fmp_call_count >= FMP_QUOTA_WARN:
         print(f"WARNING: FMP quota limit ({FMP_QUOTA_WARN} calls reached). "
@@ -385,7 +403,6 @@ def _fmp_get(path: str, fmp_key: str, **extra_params):
     wait = FMP_RATE_S - (time.time() - _fmp_last_call)
     if wait > 0:
         time.sleep(wait)
-    url    = FMP_BASE + path
     params = {"apikey": fmp_key, **extra_params}
     for attempt in range(3):
         try:
@@ -396,17 +413,20 @@ def _fmp_get(path: str, fmp_key: str, **extra_params):
                 print(f"  FMP 429 rate limit — waiting 30s (attempt {attempt+1}/3)")
                 time.sleep(30)
                 continue
+            if resp.status_code == 403:
+                print(f"  FMP 403 — endpoint requires paid tier: {url}")
+                return None
             if not resp.ok:
+                print(f"  FMP {resp.status_code} for {url}")
                 return None
             data = resp.json()
             if isinstance(data, dict) and (data.get("Error Message") or data.get("error")):
                 return None
-            # Empty list means not found, not an error
             if isinstance(data, list) and len(data) == 0:
                 return None
             return data
         except requests.RequestException as e:
-            print(f"  FMP request error ({path}): {e}")
+            print(f"  FMP request error ({url}): {e}")
             return None
     return None
 
@@ -462,61 +482,164 @@ def _get_stock_profile(symbol: str, fmp_key: str) -> Optional[dict]:
 def _yf_etf_sectors(etf_symbol: str) -> Optional[dict]:
     """Return normalized GICS sector weights from yfinance funds_data, or None."""
     if not _YF_AVAILABLE:
+        print(f"    {etf_symbol} [yfinance]: not installed — skipping")
         return None
     try:
-        with _suppress_yf():
-            ticker = yf.Ticker(etf_symbol)
-            fd = ticker.funds_data
-            raw = fd.sector_weightings if fd is not None else None
+        ticker = yf.Ticker(etf_symbol)
+        fd = ticker.funds_data
+        if fd is None:
+            print(f"    {etf_symbol} [yfinance]: funds_data is None")
+            return None
+        raw = fd.sector_weightings
         if not raw or not isinstance(raw, dict):
+            print(f"    {etf_symbol} [yfinance]: sector_weightings empty or wrong type: {type(raw)}")
             return None
         mapped: dict = {}
         for yf_key, weight in raw.items():
             if weight and weight > 0:
                 gics = YF_SECTOR_MAP.get(yf_key, "Other")
                 mapped[gics] = mapped.get(gics, 0) + float(weight)
-        return _normalize(mapped) if mapped else None
-    except Exception:
+        result = _normalize(mapped) if mapped else None
+        if result:
+            print(f"    {etf_symbol} [yfinance]: {len(result)} sectors ✓")
+        else:
+            print(f"    {etf_symbol} [yfinance]: no mappable sectors in {list(raw.keys())}")
+        return result
+    except Exception as e:
+        print(f"    {etf_symbol} [yfinance]: error — {e}")
         return None
 
 
-def get_etf_breakdown(etf_symbol: str, fmp_key: str) -> tuple:
-    """Return (sector_weights, cap_weights) for an ETF based on top-25 holdings.
+def _claude_classify(symbol: str, anthropic_key: str,
+                     is_etf: bool = False) -> Optional[tuple]:
+    """
+    Use Claude API with web search to classify a symbol by sector and market cap.
+    Returns (sector_weights, cap_weights) or None on failure.
 
-    Priority:
-      1. FMP /etf-holder (live; requires paid tier)
+    For ETFs: asks for sector breakdown as percentages.
+    For stocks: asks for single sector and market cap tier.
+    """
+    if not anthropic_key:
+        return None
+
+    import urllib.request
+    today = __import__("datetime").date.today().isoformat()
+
+    if is_etf:
+        prompt = (
+            f"What are the current sector weightings (by % of assets) for the ETF {symbol} "
+            f"as of {today}? Also provide the approximate market cap breakdown "
+            f"(Mega-Cap >$200B, Large-Cap $10B-$200B, Mid-Cap $2B-$10B, Small-Cap <$2B). "
+            f"Use GICS sector names: Information Technology, Health Care, Financials, "
+            f"Consumer Discretionary, Communication Services, Industrials, Consumer Staples, "
+            f"Energy, Real Estate, Materials, Utilities. "
+            f"Return ONLY valid JSON: "
+            f'{{\"sectors\": {{\"Information Technology\": 0.32, ...}}, '
+            f'\"caps\": {{\"Mega-Cap\": 0.55, \"Large-Cap\": 0.40, ...}}}}'
+        )
+    else:
+        prompt = (
+            f"What is the GICS sector and market cap tier for {symbol} as of {today}? "
+            f"Use GICS sector names: Information Technology, Health Care, Financials, "
+            f"Consumer Discretionary, Communication Services, Industrials, Consumer Staples, "
+            f"Energy, Real Estate, Materials, Utilities. "
+            f"Market cap tiers: Mega-Cap (>$200B), Large-Cap ($10B-$200B), "
+            f"Mid-Cap ($2B-$10B), Small-Cap ($250M-$2B), Micro-Cap (<$250M). "
+            f"Return ONLY valid JSON: "
+            f'{{\"sector\": \"Information Technology\", \"cap_tier\": \"Large-Cap\"}}'
+        )
+
+    try:
+        body = json.dumps({
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 500,
+            "system": "You are a financial data assistant. Use web search to find current data. Return ONLY raw JSON, no markdown.",
+            "messages": [{"role": "user", "content": prompt}],
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        }).encode()
+
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": anthropic_key,
+                "anthropic-version": "2023-06-01",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read())
+
+        text = "".join(
+            b["text"] for b in (data.get("content") or []) if b.get("type") == "text"
+        )
+        if not text:
+            return None
+
+        clean = text.replace("```json", "").replace("```", "").strip()
+        start = clean.find("{")
+        end   = clean.rfind("}") + 1
+        j = json.loads(clean[start:end])
+
+        if is_etf:
+            sectors = {k: float(v) for k, v in (j.get("sectors") or {}).items() if v > 0}
+            caps    = {k: float(v) for k, v in (j.get("caps")    or {}).items() if v > 0}
+            if not sectors:
+                return None
+            return _normalize(sectors), _normalize(caps) if caps else {"Other": 1.0}
+        else:
+            sector   = j.get("sector")   or "Other"
+            cap_tier = j.get("cap_tier") or "Other"
+            if sector == "Other" and cap_tier == "Other":
+                return None
+            return {sector: 1.0}, {cap_tier: 1.0}
+
+    except Exception as e:
+        print(f"    {symbol} [Claude]: error — {e}")
+        return None
+
+
+
+def get_etf_breakdown(etf_symbol: str, fmp_key: str,
+                      anthropic_key: str = "") -> tuple:
+    """Return (sector_weights, cap_weights) for an ETF.
+
+    Cascade:
+      1. FMP /etf-holder via v3 API (live; requires paid tier)
       2. yfinance funds_data.sector_weightings (live; free)
-      3. ETF_HARDCODED (static Q1-2026 approximations)
-
-    Cap tiers: yfinance has no cap data, so ETF_HARDCODED cap weights are always
-    used when yfinance is the sector source.
+      3. Claude API with web search (live; costs tokens)
+      4. ETF_HARDCODED (static Q1-2026 approximations)
     """
     if etf_symbol in _etf_cache:
         return _etf_cache[etf_symbol]
 
-    print(f"  ETF {etf_symbol}: fetching top-25 holdings…")
-    holders = _fmp_get(f"/etf-holder/{etf_symbol}", fmp_key)
+    print(f"  ETF {etf_symbol}: fetching top-25 holdings via FMP v3…")
+    holders = _fmp_get_v3(f"/etf-holder/{etf_symbol}", fmp_key)
     if not holders or not isinstance(holders, list):
-        # Try yfinance for live sector data
+        print(f"  ETF {etf_symbol}: FMP unavailable — trying yfinance…")
         yf_sectors = _yf_etf_sectors(etf_symbol)
         if yf_sectors:
-            # Cap tiers: use ETF_HARDCODED if available, else Other
             if etf_symbol in ETF_HARDCODED:
                 _, cw_raw = ETF_HARDCODED[etf_symbol]
                 cap_w = _normalize(cw_raw)
             else:
                 cap_w = {"Other": 1.0}
             result = (yf_sectors, cap_w)
-            print(f"    {etf_symbol}: live sector data from yfinance "
-                  f"({len(yf_sectors)} sectors), cap from "
-                  f"{'hardcoded' if etf_symbol in ETF_HARDCODED else 'Other'}")
-        elif etf_symbol in ETF_HARDCODED:
-            sw_raw, cw_raw = ETF_HARDCODED[etf_symbol]
-            result = (_normalize(sw_raw), _normalize(cw_raw))
-            print(f"    {etf_symbol}: using hardcoded breakdown (FMP + yfinance unavailable)")
+            print(f"    {etf_symbol} [yfinance]: {len(yf_sectors)} sectors ✓")
         else:
-            print(f"    {etf_symbol}: no holder data, no yfinance data, no hardcoded — Other/Other")
-            result = ({"Other": 1.0}, {"Other": 1.0})
+            print(f"    {etf_symbol}: yfinance failed — trying Claude API…")
+            claude_result = _claude_classify(etf_symbol, anthropic_key, is_etf=True)
+            if claude_result:
+                result = claude_result
+                print(f"    {etf_symbol} [Claude]: classification ✓")
+            elif etf_symbol in ETF_HARDCODED:
+                sw_raw, cw_raw = ETF_HARDCODED[etf_symbol]
+                result = (_normalize(sw_raw), _normalize(cw_raw))
+                print(f"    {etf_symbol}: using hardcoded (all live sources failed)")
+            else:
+                print(f"    {etf_symbol}: all sources exhausted — Other/Other")
+                result = ({"Other": 1.0}, {"Other": 1.0})
         _etf_cache[etf_symbol] = result
         return result
 
@@ -688,7 +811,8 @@ def read_all_positions(doc_name: str) -> tuple:
 
 # ── Classification ────────────────────────────────────────────────────────────
 
-def classify_positions(positions: list, fmp_key: str) -> list:
+def classify_positions(positions: list, fmp_key: str,
+                       anthropic_key: str = "") -> list:
     unique_syms = {p["symbol"] for p in positions if p.get("symbol")}
     n_401k      = sum(1 for p in positions if p.get("is_401k"))
     print(f"\nClassifying {len(positions)} positions "
@@ -712,15 +836,22 @@ def classify_positions(positions: list, fmp_key: str) -> list:
 
         if pos.get("is_etf") or (profile and profile.get("isEtf")):
             pos["is_etf"] = True
-            sw, cw = get_etf_breakdown(sym, fmp_key)
+            sw, cw = get_etf_breakdown(sym, fmp_key, anthropic_key)
         elif profile:
             sector = profile.get("sector") or "Other"
             tier   = _mktcap_tier(profile["mktCap"]) if profile.get("mktCap", 0) > 0 else "Other"
             sw, cw = {sector: 1.0}, {tier: 1.0}
             print(f"  {sym}: {sector} / {tier}")
         else:
-            print(f"  {sym}: profile not found — Other/Other")
-            sw, cw = {"Other": 1.0}, {"Other": 1.0}
+            # FMP profile not found — try Claude API
+            print(f"  {sym}: FMP profile not found — trying Claude API…")
+            claude_result = _claude_classify(sym, anthropic_key, is_etf=False)
+            if claude_result:
+                sw, cw = claude_result
+                print(f"  {sym} [Claude]: {list(sw.keys())[0]} / {list(cw.keys())[0]} ✓")
+            else:
+                print(f"  {sym}: all sources failed — Other/Other")
+                sw, cw = {"Other": 1.0}, {"Other": 1.0}
 
         pos["sector_weights"] = sw
         pos["cap_weights"]    = cw
@@ -811,97 +942,106 @@ def _build_table_rows(totals: dict, order: list, grand_total: float) -> tuple:
     return rows
 
 
-def _write_breakdown_table(nb: NumBridgeClient, doc_name: str,
-                            table_name: str, header: list,
-                            data_rows: list, grand_total: float,
-                            x: float, y: float):
-    """Create a breakdown table on the Summary sheet and populate it."""
-    n_data = len(data_rows)
-    n_rows = 1 + n_data + 1   # header + data + total
+def _as_str(s: str) -> str:
+    """Quote a string for AppleScript."""
+    return '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
-    # Create table
-    nb.call("add_table", document=doc_name, sheet=SUMMARY_SHEET,
-            name=table_name, num_rows=n_rows, num_columns=3)
-    # Position it
-    nb.call("set_table_layout", document=doc_name, sheet=SUMMARY_SHEET,
-            table=table_name, x=x, y=y, width=420.0,
-            height=float(n_rows * 22 + 4))
+
+def _write_breakdown_table(doc_name: str, sheet: str, table_name: str,
+                            header: list, data_rows: list,
+                            grand_total: float):
+    """Create or recreate a breakdown table using AppleScript."""
+    n_data = len(data_rows)
+    n_rows = 1 + n_data + 1  # header + data + total row
+
+    # Step 1: delete existing table if present, then create new one
+    run_applescript_file(f'''tell application "Numbers"
+  tell document {_as_str(doc_name)}
+    tell sheet {_as_str(sheet)}
+      set tnames to name of every table
+      if {_as_str(table_name)} is in tnames then
+        delete (first table whose name is {_as_str(table_name)})
+      end if
+    end tell
+  end tell
+end tell''')
+
+    run_applescript_file(f'''tell application "Numbers"
+  tell document {_as_str(doc_name)}
+    tell sheet {_as_str(sheet)}
+      make new table with properties {{name:{_as_str(table_name)}, row count:{n_rows}, column count:3}}
+    end tell
+  end tell
+end tell''')
+
+    # Step 2: write all values in one batched AppleScript call
+    stmts = []
 
     # Header row
-    nb.call("set_range", document=doc_name, sheet=SUMMARY_SHEET, table=table_name,
-            start_row=1, start_col=1, values=[header], bold=True)
+    stmts.append(f'set value of cell 1 of row 1 to {_as_str(header[0])}')
+    stmts.append(f'set value of cell 2 of row 1 to {_as_str(header[1])}')
+    stmts.append(f'set value of cell 3 of row 1 to {_as_str(header[2])}')
 
     # Data rows
-    if data_rows:
-        nb.call("set_range", document=doc_name, sheet=SUMMARY_SHEET, table=table_name,
-                start_row=2, start_col=1, values=data_rows)
+    for i, row in enumerate(data_rows):
+        r = i + 2
+        label = str(row[0])
+        mv    = float(row[1])
+        pct   = float(row[2])
+        stmts.append(f'set value of cell 1 of row {r} to {_as_str(label)}')
+        stmts.append(f'set value of cell 2 of row {r} to {mv}')
+        stmts.append(f'set value of cell 3 of row {r} to {pct}')
 
     # Total row
     total_pct = round(sum(r[1] for r in data_rows) / grand_total, 6) if grand_total else 1.0
-    nb.call("set_range", document=doc_name, sheet=SUMMARY_SHEET, table=table_name,
-            start_row=n_rows, start_col=1,
-            values=[["Total", round(grand_total, 2), total_pct]],
-            bold=True)
+    stmts.append(f'set value of cell 1 of row {n_rows} to "Total"')
+    stmts.append(f'set value of cell 2 of row {n_rows} to {round(grand_total, 2)}')
+    stmts.append(f'set value of cell 3 of row {n_rows} to {total_pct}')
 
-    # Column formats
-    nb.call("set_column_format", document=doc_name, sheet=SUMMARY_SHEET,
-            table=table_name, column=2, number_format="currency")
-    nb.call("set_column_format", document=doc_name, sheet=SUMMARY_SHEET,
-            table=table_name, column=3, number_format="percentage")
+    body = "\n        ".join(stmts)
+    run_applescript_file(f'''tell application "Numbers"
+  tell document {_as_str(doc_name)}
+    tell sheet {_as_str(sheet)}
+      tell table {_as_str(table_name)}
+        {body}
+      end tell
+    end tell
+  end tell
+end tell''')
+
+    # Step 3: apply column formats
+    run_applescript_file(f'''tell application "Numbers"
+  tell document {_as_str(doc_name)}
+    tell sheet {_as_str(sheet)}
+      tell table {_as_str(table_name)}
+        repeat with r from 1 to {n_rows}
+          set format of cell 2 of row r to currency
+          set format of cell 3 of row r to percent
+        end repeat
+      end tell
+    end tell
+  end tell
+end tell''')
 
 
-def write_to_numbers(doc_name: str, nb: NumBridgeClient,
-                     sector_totals: dict, cap_totals: dict):
+def write_to_numbers(doc_name: str, sector_totals: dict, cap_totals: dict):
     grand_total = sum(sector_totals.values())
 
-    # Remove existing breakdown tables if present
-    existing_raw = nb.call("list_tables", document=doc_name, sheet=SUMMARY_SHEET)
-    existing = [t.strip() for t in existing_raw.splitlines() if t.strip()]
-    for tname in (SECTOR_TABLE, CAP_TABLE):
-        if tname in existing:
-            print(f"  Removing existing table: {tname}")
-            nb.call("remove_table", document=doc_name, sheet=SUMMARY_SHEET, table=tname)
-
-    # Get Portfolio Summary layout for positioning
-    summary_x = 50.0
-    summary_y = 50.0
-    summary_w = 400.0
-    summary_h = 120.0
-    try:
-        layout_raw = nb.call("get_table_layout", document=doc_name,
-                              sheet=SUMMARY_SHEET, table=SUMMARY_TABLE)
-        layout = json.loads(layout_raw)
-        summary_x = float(layout.get("x", summary_x))
-        summary_y = float(layout.get("y", summary_y))
-        summary_w = float(layout.get("width", summary_w))
-        summary_h = float(layout.get("height", summary_h))
-    except Exception as e:
-        print(f"  WARNING: could not read Portfolio Summary layout: {e} — using defaults")
-
-    # Place Sector Breakdown to the right of Portfolio Summary
-    sector_x = summary_x + summary_w + 40
-    sector_y = summary_y
     sector_rows = _build_table_rows(sector_totals, SECTOR_ORDER, grand_total)
-    sector_height = (1 + len(sector_rows) + 1) * 22 + 4
+    cap_rows    = _build_table_rows(cap_totals,    CAP_ORDER,    grand_total)
 
     print(f"  Writing {SECTOR_TABLE} ({len(sector_rows)} rows)…")
-    _write_breakdown_table(nb, doc_name, SECTOR_TABLE,
+    _write_breakdown_table(doc_name, SUMMARY_SHEET, SECTOR_TABLE,
                            ["Sector", "Market Value", "% of Portfolio"],
-                           sector_rows, grand_total,
-                           sector_x, sector_y)
-
-    # Place Cap Breakdown below Sector Breakdown
-    cap_x = sector_x
-    cap_y = sector_y + sector_height + 30
-    cap_rows = _build_table_rows(cap_totals, CAP_ORDER, grand_total)
+                           sector_rows, grand_total)
+    print(f"  {SECTOR_TABLE} ✓")
 
     print(f"  Writing {CAP_TABLE} ({len(cap_rows)} rows)…")
-    _write_breakdown_table(nb, doc_name, CAP_TABLE,
+    _write_breakdown_table(doc_name, SUMMARY_SHEET, CAP_TABLE,
                            ["Cap Tier", "Market Value", "% of Portfolio"],
-                           cap_rows, grand_total,
-                           cap_x, cap_y)
+                           cap_rows, grand_total)
+    print(f"  {CAP_TABLE} ✓")
 
-    print(f"  Done — {nb._calls} NumBridge calls used")
 
 
 # ── Document auto-detection ───────────────────────────────────────────────────
@@ -941,10 +1081,14 @@ def main():
                         help="Print breakdown without writing to Numbers")
     args = parser.parse_args()
 
-    config  = load_config()
-    fmp_key = config.get("fmp_key", "")
+    config        = load_config()
+    fmp_key       = config.get("fmp_key", "")
+    anthropic_key = config.get("anthropic_api_key", "")
     if not fmp_key:
         sys.exit("ERROR: FMP_KEY is required. Set it in env or ~/.dividend_refresher/config.json")
+    if not anthropic_key:
+        print("NOTE: No ANTHROPIC_API_KEY found — Claude fallback disabled. "
+              "Set it in env or config for best results when FMP/yfinance fail.")
 
     # Resolve document name
     doc_name = args.doc
@@ -974,7 +1118,7 @@ def main():
           f"(${equity_total:,.0f}), cash: ${cash_mv:,.0f}")
 
     # Classify
-    positions = classify_positions(positions, fmp_key)
+    positions = classify_positions(positions, fmp_key, anthropic_key)
 
     # Aggregate
     sector_totals, cap_totals = aggregate_breakdowns(positions, cash_mv)
@@ -986,17 +1130,10 @@ def main():
         print("\n(--preview: not writing to Numbers)")
         return
 
-    # Write to Numbers via NumBridge
-    print(f"\nConnecting to NumBridge at {NUMBRIDGE_URL}…")
-    nb = NumBridgeClient()
-    if not nb.available:
-        print("WARNING: NumBridge is not running — skipping write to Numbers.")
-        print("  Start NumBridge, then re-run without --preview.")
-        return
-
-    print(f"Writing breakdown tables to Summary sheet…")
+    # Write to Numbers via AppleScript
+    print(f"\nWriting breakdown tables to Summary sheet…")
     try:
-        write_to_numbers(doc_name, nb, sector_totals, cap_totals)
+        write_to_numbers(doc_name, sector_totals, cap_totals)
         print(f"\nDone. Open the Summary sheet in Numbers to view the tables.")
     except Exception as e:
         print(f"ERROR writing to Numbers: {e}")
