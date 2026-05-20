@@ -29,7 +29,7 @@ When `--summary-only` is used: `csv_file` is not required. The document must alr
 
 The script requires:
 1. Apple Numbers installed and accessible via `osascript`
-2. A template Numbers document with sheets named `_template1`–`_template6` (and optionally a `_basis` sheet), each `_templateN` sheet containing a `My Portfolio` table — defaults to `"Portfolio Template.numbers"`
+2. A template Numbers document with sheets named `_template1`–`_template6`, each `_templateN` sheet containing a `My Portfolio` table — defaults to `"Portfolio Template.numbers"`
 
 Optional: `ANTHROPIC_API_KEY` env var enables dividend gap-filling via Claude API.
 
@@ -54,19 +54,19 @@ Unused template sheets (`_template5`–`_template6`) are deleted at the end. The
 
 `read_template` reads from `_template1` (falls back to `_template` for backward compatibility).
 
-### `_basis` Sheet (Optional Cost Basis Overrides)
-The template may contain a sheet named `_basis` with a table named `Basis`. This sheet is **never** deleted — it has no digit suffix so `TEMPLATE_SHEET_RE` (`^_templa\w*(\d+)$`) does not match it.
+### `_basis.json` (Optional Cost Basis Overrides)
+Cost basis overrides live in `_basis.json` in the repository root. This file is **gitignored** — it contains personal financial data and must never be committed. Copy `_basis-example.json` to `_basis.json` to get started.
 
-The `Basis` table must have these columns (row 1 = header, data from row 2):
+Format: a JSON array of objects with these fields:
 
-| Column | Contents |
-|--------|----------|
-| A — Symbol | Ticker symbol (case-insensitive) |
-| B — Account | Exact account name as it appears in the Fidelity CSV |
-| C — Avg Cost Basis | Average cost per share (number or `$`-prefixed string) |
-| D — Notes | Optional; ignored by the script |
+| Field | Required | Contents |
+|-------|----------|----------|
+| `symbol` | yes | Ticker symbol (case-insensitive) |
+| `account` | yes | Exact account name as it appears in the Fidelity CSV |
+| `avg_cost_basis` | yes | Average cost per share (number) |
+| `notes` | no | Optional; ignored by the script |
 
-`read_basis_overrides(template_doc_name)` reads this table via JXA after the template is open and returns `{(SYMBOL_UPPER, account_name): avg_cost_basis_float}`. In `parse_csv`, the override is applied when `avg_cost_basis` is missing or ≤ 0 for non-T-Bill positions — after the T-Bill cost basis derivation, before the `last_price` placeholder fallback. In dry-run mode the template is never opened, so `basis_overrides` is `{}`.
+`read_basis_overrides()` reads `_basis.json` (resolved relative to the script's directory) and returns `{(SYMBOL_UPPER, account_name): avg_cost_basis_float}`. It is called unconditionally — including in dry-run mode — because it no longer requires Numbers to be open. In `parse_csv`, the override is applied when `avg_cost_basis` is missing or ≤ 0 for non-T-Bill positions — after the T-Bill cost basis derivation, before the `last_price` placeholder fallback.
 
 ### Bulk Write Strategy (`_write_rows_as_batch`)
 Two osascript calls per sheet for all data rows:
@@ -147,7 +147,7 @@ re.sub(r"([A-Z]+)2\b", lambda m: f"{m.group(1)}{r}", cell)
 **Missing cost basis**: if `cost_basis_total` is `None` when a symbol is first added to the equity accumulator, a `⚠` warning is printed and the value is treated as 0.
 
 **Missing avg cost basis for equities**: cost basis lookup applies in this priority order:
-1. `_basis` sheet override (highest priority, see `read_basis_overrides`)
+1. `_basis.json` override (highest priority, see `read_basis_overrides`)
 2. Value from the CSV `Average Cost Basis` column (if > 0)
 3. T-Bill cost basis derivation (T-Bills only: face value × quantity / 100)
 4. `last_price` as a placeholder (so gain shows ~$0 instead of full value). Marked with `⚠` in the dry-run output.
@@ -447,7 +447,7 @@ reads and writes cells directly.
 ### Sheet Handling
 
 Processes all sheets starting with `"Portfolio"` **except `"Portfolio-Cash"`**.
-The `_basis` sheet is excluded automatically (doesn't start with "Portfolio").
+The `_basis.json` file is not a sheet and is never iterated over.
 `Summary` is excluded automatically (doesn't start with "Portfolio").
 
 ### Data Source Cascade

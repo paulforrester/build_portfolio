@@ -1,0 +1,4 @@
+[
+  {"symbol": "AAPL", "account": "Brokerage Account", "avg_cost_basis": 150.00, "notes": "example — replace with your own data"},
+  {"symbol": "VTI",  "account": "IRA Account",       "avg_cost_basis": 220.50}
+]

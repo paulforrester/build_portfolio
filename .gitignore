@@ -4,6 +4,9 @@ __pycache__/
 # Fidelity CSV exports — contain personal financial data
 *.csv
 
+# Personal cost basis overrides — use _basis-example.json as a template
+_basis.json
+
 # Generated output documents (not the template)
 Portfolio *.numbers
 !Portfolio Template.numbers

@@ -276,63 +276,33 @@ JSON.stringify({{ docName: doc.name(), colCount: colCount, headers: headers, for
 
 # ── Basis Override Reader ──────────────────────────────────────────────────────
 
-def read_basis_overrides(template_doc_name: str) -> dict:
-    """Read the _basis sheet from the already-open template document.
+_BASIS_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_basis.json")
+
+def read_basis_overrides(path: str = _BASIS_JSON) -> dict:
+    """Read cost basis overrides from _basis.json.
 
     Returns {(SYMBOL_UPPER, account_name_exact): avg_cost_basis_float}.
-    Skips rows where Symbol or Account is empty. Skips the header row (index 0).
-    Returns an empty dict if the sheet or table is missing (no error).
+    Returns an empty dict if the file does not exist.
     """
-    jxa = f'''
-var app = Application("Numbers");
-var result = [];
-var docs = app.documents();
-var doc = null;
-for (var i = 0; i < docs.length; i++) {{
-  if (docs[i].name() === {json.dumps(template_doc_name)}) {{ doc = docs[i]; break; }}
-}}
-if (doc) {{
-  var sheets = doc.sheets();
-  var sheet = null;
-  for (var j = 0; j < sheets.length; j++) {{
-    if (sheets[j].name() === "_basis") {{ sheet = sheets[j]; break; }}
-  }}
-  if (sheet) {{
-    var tables = sheet.tables();
-    var table = null;
-    for (var k = 0; k < tables.length; k++) {{
-      if (tables[k].name() === "Basis") {{ table = tables[k]; break; }}
-    }}
-    if (table) {{
-      var rowCount = table.rowCount();
-      for (var r = 1; r < rowCount; r++) {{
-        try {{
-          var sym = String(table.rows[r].cells[0].value() || "").trim();
-          var acc = String(table.rows[r].cells[1].value() || "").trim();
-          var cb  = String(table.rows[r].cells[2].value() || "").trim();
-          if (sym && acc && cb) result.push([sym, acc, cb]);
-        }} catch(e) {{}}
-      }}
-    }}
-  }}
-}}
-JSON.stringify(result);
-'''
+    if not os.path.exists(path):
+        return {}
     try:
-        raw = run_jxa_file(jxa)
-        rows = json.loads(raw)
+        with open(path) as f:
+            rows = json.load(f)
     except Exception as e:
-        print(f"  WARNING: Could not read _basis sheet: {e}")
+        print(f"  WARNING: Could not read _basis.json: {e}")
         return {}
 
     overrides = {}
     for row in rows:
-        sym, acc, cb_str = row
-        cb_str = re.sub(r"[$,\s]", "", cb_str)
-        try:
-            overrides[(sym.upper(), acc)] = float(cb_str)
-        except ValueError:
-            pass
+        sym = str(row.get("symbol", "")).strip()
+        acc = str(row.get("account", "")).strip()
+        cb  = row.get("avg_cost_basis")
+        if sym and acc and cb is not None:
+            try:
+                overrides[(sym.upper(), acc)] = float(cb)
+            except (ValueError, TypeError):
+                pass
     return overrides
 
 
@@ -754,14 +724,14 @@ def parse_csv(path, basis_overrides=None):
         if (tbill or cd) and cost_basis is not None and quantity:
             avg_cb = fmt_money(cost_basis / (quantity / 100))
 
-        # _basis sheet override: highest-priority fallback for missing or zero avg cost basis.
+        # _basis.json override: highest-priority fallback for missing or zero avg cost basis.
         # Applies to equities only (not T-Bills/CDs, which have their own derivation above).
         if (avg_cb is None or avg_cb <= 0) and not (tbill or cd):
             key = (symbol.upper(), account_name)
             if key in basis_overrides:
                 avg_cb = basis_overrides[key]
                 cost_basis = fmt_money(avg_cb * quantity)
-                print(f"  ✓ {symbol} ({account_name}): cost basis from _basis sheet (${avg_cb:.2f})")
+                print(f"  ✓ {symbol} ({account_name}): cost basis from _basis.json (${avg_cb:.2f})")
 
         # When avg_cost_basis is missing for an equity with a known price, use last_price as a
         # temporary placeholder so the gain column shows ~$0 rather than the full current value.
@@ -1528,8 +1498,13 @@ def main():
     build_ira    = not (args.brokerage_only or args.equity_only or args.cash_only or args.roth_only)
     build_roth   = not (args.brokerage_only or args.equity_only or args.cash_only or args.ira_only)
 
-    # ── Template + _basis (skipped in dry-run to avoid starting Numbers) ──
-    basis_overrides: dict = {}
+    # ── Basis overrides (always loaded — reads _basis.json, not Numbers) ──
+    basis_overrides = read_basis_overrides()
+    n_ov = len(basis_overrides)
+    if n_ov:
+        print(f"  {n_ov} cost basis override(s) loaded from _basis.json")
+
+    # ── Template (skipped in dry-run to avoid starting Numbers) ──
     col_map = headers = formula_row = num_cols = col_widths = None
     template_path = _tmpl_doc_name = None
 
@@ -1539,11 +1514,6 @@ def main():
         template_path = _resolve_template_path(args.template)
         print(f"  Template: '{template_path}'")
         print(f"  {num_cols} columns, {len(col_map)} named headers")
-
-        basis_overrides = read_basis_overrides(_tmpl_doc_name)
-        n_ov = len(basis_overrides)
-        if n_ov:
-            print(f"  {n_ov} cost basis override(s) loaded from _basis sheet")
 
     # ── Parse CSV ──
     print(f"\nParsing {args.csv_file}...")
@@ -1608,7 +1578,7 @@ def main():
     print(f"  ✓ Opened: '{actual_doc}'")
 
     # ── Template sheet queue ──
-    # TEMPLATE_SHEET_RE only matches _templateN sheets; _basis is excluded automatically.
+    # TEMPLATE_SHEET_RE only matches _templateN sheets (digit suffix required).
     all_sheets = list_sheets_as(actual_doc)
     available_templates = sorted(
         [s for s in all_sheets if TEMPLATE_SHEET_RE.match(s)],
@@ -1697,7 +1667,6 @@ def main():
         sheet_positions_for_divs["Portfolio-ROTH"] = [(i + 2, p) for i, p in enumerate(roth)]
 
     # ── Delete unused template sheets (_template5, _template6, ...) ──
-    # _basis is not in template_queue (TEMPLATE_SHEET_RE requires a digit suffix) — safe to skip.
     for unused in template_queue:
         print(f"  Deleting unused template sheet '{unused}'...")
         delete_sheet_as(actual_doc, unused)

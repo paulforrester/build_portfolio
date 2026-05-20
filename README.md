@@ -29,7 +29,7 @@ Five sheets in the output `.numbers` file (Summary is always first):
 
 **401k positions** have no ticker symbol; price and market value are taken directly from the CSV rather than fetched via `STOCK()`.
 
-**Cost basis overrides**: if the template contains a `_basis` sheet with a `Basis` table (columns: Symbol, Account, Avg Cost Basis, Notes), those values override missing or zero cost basis from the CSV before the `last_price` placeholder fallback is used.
+**Cost basis overrides**: if `_basis.json` exists in the same directory as the script, those values override missing or zero cost basis from the CSV before the `last_price` placeholder fallback is used. Copy `_basis-example.json` to `_basis.json` and fill in your data. The file is gitignored to prevent accidentally committing personal financial data.
 
 Monthly dividend columns self-update every month via Numbers `MONTHNAME(NOW())` formulas — no script changes needed.
 
@@ -101,8 +101,6 @@ Output defaults to `~/Desktop/{document name}.numbers`. If a file with that name
 
 The script requires `Portfolio Template.numbers` (in the same directory, or specify with `--template`) with sheets named `_template1` through `_template6`. It consumes four of them in order (`_template1`→Portfolio, `_template2`→Portfolio-Cash, `_template3`→Portfolio-IRA, `_template4`→Portfolio-ROTH) and deletes the rest.
 
-**Optional:** add a sheet named `_basis` with a table named `Basis` (columns: Symbol, Account, Avg Cost Basis, Notes). The script reads it to override missing cost basis values from the CSV. This sheet is never deleted by the script.
-
 Each `_templateN` sheet must contain a table named **My Portfolio** where:
 
 - **Row 1** — column headers (Symbol, Name, Shares, Price, …)
@@ -155,6 +153,6 @@ Uses the same four-source cascade (AV → FMP → Yahoo → Claude) and cross-sh
 
 ## Privacy note
 
-The Fidelity CSV export contains real account names, positions, and balances. The `.gitignore` in this repo excludes `*.csv` and generated `Portfolio *.numbers` files. **Never commit those files.**
+The Fidelity CSV export contains real account names, positions, and balances. The `.gitignore` in this repo excludes `*.csv`, `_basis.json`, and generated `Portfolio *.numbers` files. **Never commit those files.**
 
 API keys stored in `~/.dividend_refresher/config.json` live in your home directory by design — outside the repository — so they cannot be accidentally committed.
