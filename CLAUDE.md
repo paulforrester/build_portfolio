@@ -489,15 +489,17 @@ unconditionally.
 ## categorize_portfolio.py
 
 Classifies all portfolio positions by GICS sector and market cap tier, writing two
-summary tables (`Sector Breakdown`, `Cap Breakdown`) to the Summary sheet.
+summary tables (`Sector Breakdown`, `Cap Breakdown`) to the Summary sheet via
+AppleScript — no NumBridge required. The document must already be open in Numbers.
 
 Uses FMP API for individual stock profiles and ETF holdings (top-25 holdings per
 ETF, weighted). 401k funds without tickers use hardcoded classification by fund
-description keyword. Requires `FMP_KEY`. Uses same config file as
+description keyword. Requires `FMP_KEY`. `ANTHROPIC_API_KEY` is optional but
+strongly recommended as the final fallback source. Uses same config file as
 `refresh_dividends.py` (`~/.dividend_refresher/config.json`).
 
-**Requires NumBridge running** for writing tables. If NumBridge is unavailable the
-script degrades gracefully: breakdown is printed to stdout, write is skipped.
+`--doc` is optional — if omitted, the script auto-detects the first open Numbers
+document that contains Portfolio sheets.
 
 ```bash
 python3 categorize_portfolio.py
@@ -505,13 +507,26 @@ python3 categorize_portfolio.py --doc "Portfolio May 2026 (13).numbers"
 python3 categorize_portfolio.py --preview   # print only, don't write to Numbers
 ```
 
-### ETF classification
+### FMP API endpoints
 
-Calls `/etf-holder/{symbol}` for the top-25 holdings by weight, then
-`/profile/{holding}` for each to get `sector` and `mktCap`. Results are cached
-in memory per run. Budget: ~26 FMP calls per unique ETF symbol (1 holder + 25
-profiles). Individual stock profiles are also cached — QQQM appearing in both
-Portfolio and Portfolio-IRA triggers only one set of API calls.
+The script uses two FMP base URLs:
+- `FMP_BASE = "https://financialmodelingprep.com/stable"` — stock profiles (`/profile`)
+- `FMP_V3_BASE = "https://financialmodelingprep.com/api/v3"` — ETF holders only (`/etf-holder/{symbol}`)
+
+The `/etf-holder` endpoint requires a paid FMP tier — the free tier returns 403, which triggers cascade fallthrough.
+
+### ETF classification — four-source cascade
+
+For each ETF, the script tries sources in order and uses the first that returns usable data:
+
+1. **FMP `/etf-holder/{symbol}`** (via v3 API) — live top-25 holdings; requires paid tier
+2. **yfinance `funds_data.sector_weightings`** — live; free, no key required
+3. **Claude API with web search** — live; uses `ANTHROPIC_API_KEY`; costs tokens
+4. **`ETF_HARDCODED` dict** — static Q1-2026 approximations built into the script
+
+When FMP returns the top-25 holdings, it fetches each holding's profile (`/stable/profile`) to get `sector` and `mktCap`, then weights them. Results are cached in memory per run — QQQM appearing in both Portfolio and Portfolio-IRA triggers only one set of API calls.
+
+For individual stocks not found in FMP profile, the script also falls through to Claude API before giving up.
 
 Known ETF list (pre-flagged without needing a profile call): `KNOWN_ETFS` constant.
 Any symbol FMP returns with `isEtf: true` is also classified as ETF regardless.
@@ -532,17 +547,20 @@ Any symbol FMP returns with `isEtf: true` is also classified as ETF regardless.
 `"2030"`, `"bond"`, `"international"`) to `(sector_weights, cap_weights)` tuples.
 Weights are normalized to 1.0 at runtime. No match → `{"Other": 1.0}`.
 
-### Table placement (NumBridge)
+### Table writing (AppleScript)
 
-Tables are created on the `Summary` sheet using `add_table`, then positioned with
-`set_table_layout` relative to the existing `Portfolio Summary` table (to its
-right). `Sector Breakdown` goes at `(summary.x + summary.width + 40, summary.y)`;
-`Cap Breakdown` is placed below it. Column 2 formatted as `currency`, column 3 as
-`percentage` via `set_column_format`. Existing tables with the same names are
-removed and recreated on each run.
+Tables are written directly to the `Summary` sheet via `run_applescript_file` — no NumBridge required:
+
+1. **Delete existing table** — `delete (first table whose name is …)` if present
+2. **Create new table** — `make new table with properties {name:…, row count:…, column count:3}`
+3. **Write all values** — one batched AppleScript call with `set value of cell N of row R to …` for header, data rows, and totals row
+4. **Apply column formats** — `set format of cell 2 of row R to currency` and `set format of cell 3 of row R to percent` (note: `percent`, not `percentage`)
+
+Existing tables with the same names are removed and recreated on each run.
 
 ### "Other" category
 
-Holds unclassified portions: ETF holdings outside the top-25, profiles not found
-in FMP, and any position the script could not classify. Acceptable at < ~15% of
-total portfolio value.
+Holds unclassified portions: ETF holdings outside the FMP top-25, profiles not found
+in FMP, and positions that exhausted all four sources (FMP + yfinance + Claude +
+hardcoded). In practice very small since Claude with web search is a reliable final
+fallback. Acceptable at < ~15% of total portfolio value.

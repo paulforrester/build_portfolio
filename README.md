@@ -2,6 +2,15 @@
 
 Reads a Fidelity brokerage position export (CSV) and builds a fully populated Apple Numbers portfolio tracking document — directly via AppleScript, no intermediary server required.
 
+## Tools in this repository
+
+| Tool | Description |
+|------|-------------|
+| `build_portfolio.py` | Reads a Fidelity CSV and builds a new Numbers portfolio document |
+| `refresh_dividends.py` | Updates dividend data (ex-div dates, pay dates, monthly amounts) in an open Numbers document |
+| `categorize_portfolio.py` | Classifies all positions by GICS sector and market cap, writes breakdown tables to the Summary sheet |
+| `dividend-refresher.html` | Browser-based equivalent of `refresh_dividends.py` — requires NumBridge running |
+
 ## What it produces
 
 Five sheets in the output `.numbers` file (Summary is always first):
@@ -27,8 +36,30 @@ Monthly dividend columns self-update every month via Numbers `MONTHNAME(NOW())` 
 ## Requirements
 
 - macOS with **Apple Numbers** installed
-- Python 3 (stdlib only — no pip packages needed for the core script)
-- Optional: `ANTHROPIC_API_KEY` environment variable to enable automatic dividend gap-filling via Claude API (requires `pip install anthropic`)
+- Python 3
+- `pip install requests` — required by `refresh_dividends.py` and `categorize_portfolio.py`
+- `pip install yfinance` — optional but recommended; used by `categorize_portfolio.py` for live ETF sector data
+- `pip install anthropic` — optional; enables Claude API dividend gap-filling in `build_portfolio.py` and `refresh_dividends.py`
+
+**API keys** (optional for `build_portfolio.py`; see individual tool sections for what each tool needs):
+
+| Key | Used by | Free tier | Where to get one |
+|-----|---------|-----------|-----------------|
+| `ANTHROPIC_API_KEY` | all three Python tools (Claude fallback) | pay-per-token | [console.anthropic.com](https://console.anthropic.com) |
+| `FMP_KEY` | `categorize_portfolio.py` (required), `refresh_dividends.py` | 250 req/day | [financialmodelingprep.com/register](https://financialmodelingprep.com/register) |
+| `AV_KEY` | `refresh_dividends.py` (1st source) | 25 req/day | [alphavantage.co](https://www.alphavantage.co/support/#api-key) |
+
+Keys can be set as environment variables or stored in `~/.dividend_refresher/config.json` (shared by all three Python tools):
+
+```json
+{
+  "av_key": "YOUR_AV_KEY",
+  "fmp_key": "YOUR_FMP_KEY",
+  "anthropic_api_key": "YOUR_ANTHROPIC_KEY"
+}
+```
+
+This file lives in your home directory by design — outside the repository — so API keys cannot be accidentally committed.
 
 ## Setup
 
@@ -80,6 +111,50 @@ Each `_templateN` sheet must contain a table named **My Portfolio** where:
 
 Column widths and number formats set on the template sheets are preserved in the output.
 
+## refresh_dividends.py
+
+Updates dividend data for all equity positions across all Portfolio sheets in an open Numbers document. For each symbol, it fetches the current ex-dividend date, pay date, annual dividend per share, dividends per year, and the four rolling monthly dividend amount columns, then writes the results back and sorts each sheet by pay date.
+
+Tries four data sources in cascade order, using the first that returns current data: **Alpha Vantage → FMP → Yahoo Finance → Claude API** with web search. Cross-sheet deduplication means each unique symbol (e.g. VTI held in both Portfolio and Portfolio-IRA) is looked up exactly once and written to all sheets. `Portfolio-Cash` is excluded entirely. T-Bills and money market funds are always skipped.
+
+**`--doc` is required.** Use the document name as shown in Numbers' title bar — no `.numbers` suffix. Keys are read from environment variables or `~/.dividend_refresher/config.json` (see Requirements above).
+
+```bash
+python3 refresh_dividends.py --doc "Portfolio May 2026"
+python3 refresh_dividends.py --doc "Portfolio May 2026" --force        # re-fetch even if dates are current
+python3 refresh_dividends.py --doc "Portfolio May 2026" --preview      # fetch but don't write to Numbers
+python3 refresh_dividends.py --doc "Portfolio May 2026" --no-claude    # skip Claude API fallback
+python3 refresh_dividends.py --doc "Portfolio May 2026" --amounts-only # recalculate monthly amounts only
+```
+
+The script skips positions whose existing sheet dates are already in the current month or later — pass `--force` to override this check on every symbol.
+
+## categorize_portfolio.py
+
+Classifies all portfolio positions by GICS sector and market cap tier, then writes `Sector Breakdown` and `Cap Breakdown` tables to the Summary sheet. The document must already be open in Numbers. Results are also printed to stdout so you can review them without writing.
+
+For ETFs, four sources are tried in order: **FMP ETF holders** (paid tier) → **yfinance** sector weightings (free) → **Claude API** with web search → **hardcoded Q1-2026 approximations**. Individual stocks use FMP profile then fall back to Claude API. 401k fund positions without ticker symbols are classified by description keyword (e.g. "S&P 500", "2030", "bond", "international").
+
+**`FMP_KEY` is required** (free tier: 250 req/day). `ANTHROPIC_API_KEY` is optional but strongly recommended — it covers cases where FMP and yfinance both fail. Keys are read from `~/.dividend_refresher/config.json` (same file as `refresh_dividends.py`).
+
+`--doc` is optional — if omitted, the script auto-detects the first open Numbers document that has Portfolio sheets.
+
+```bash
+python3 categorize_portfolio.py
+python3 categorize_portfolio.py --doc "Portfolio May 2026 (13).numbers"
+python3 categorize_portfolio.py --preview   # print breakdown to stdout only
+```
+
+## dividend-refresher.html
+
+A browser-based equivalent of `refresh_dividends.py`, retained as an alternative and for reference. Open it directly in any browser (`file://…`) — no local server needed.
+
+**Requires NumBridge running** at `http://127.0.0.1:8765/mcp` — the browser cannot call `osascript` directly so it drives Numbers through the NumBridge MCP server instead. For most use cases `refresh_dividends.py` is preferred since it runs natively with no browser and no NumBridge dependency.
+
+Uses the same four-source cascade (AV → FMP → Yahoo → Claude) and cross-sheet deduplication logic as `refresh_dividends.py`. API keys are stored in the browser's `localStorage` via the ⚙ Settings panel.
+
 ## Privacy note
 
 The Fidelity CSV export contains real account names, positions, and balances. The `.gitignore` in this repo excludes `*.csv` and generated `Portfolio *.numbers` files. **Never commit those files.**
+
+API keys stored in `~/.dividend_refresher/config.json` live in your home directory by design — outside the repository — so they cannot be accidentally committed.
