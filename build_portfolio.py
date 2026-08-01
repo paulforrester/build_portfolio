@@ -678,7 +678,7 @@ def parse_csv(path, basis_overrides=None):
         lines = f.readlines()
 
     start = 0
-    if lines and not lines[0].strip().startswith("Account Name"):
+    if lines and not lines[0].strip().lower().startswith("account name"):
         start = 1
 
     reader = csv.DictReader(lines[start:])
@@ -686,11 +686,11 @@ def parse_csv(path, basis_overrides=None):
 
     positions = []
     for row in reader:
-        row = {k.strip(): (v.strip() if v else "") for k, v in row.items() if k}
-        symbol_raw = row.get("Symbol", "").strip()
+        row = {k.strip().lower(): (v.strip() if v else "") for k, v in row.items() if k}
+        symbol_raw = row.get("symbol", "").strip()
         symbol = clean_symbol(symbol_raw)
-        description = row.get("Description", "").strip()
-        account_name = row.get("Account Name", "").strip()
+        description = row.get("description", "").strip()
+        account_name = row.get("account name", "").strip()
 
         if not account_name:
             continue
@@ -709,12 +709,12 @@ def parse_csv(path, basis_overrides=None):
 
         effective_symbol = symbol if symbol else re.sub(r"\s+", "_", description[:20]).upper()
 
-        quantity     = fmt_qty(parse_float(row.get("Quantity")) or 0.0)
-        last_price   = fmt_money(parse_float(row.get("Last Price")) or 0.0)
-        last_chg     = fmt_money(parse_float(row.get("Last Price Change")) or 0.0)
-        cur_value    = fmt_money(parse_float(row.get("Current Value")) or 0.0)
-        cost_basis   = fmt_money(parse_float(row.get("Cost Basis Total")))
-        avg_cb       = fmt_money(parse_float(row.get("Average Cost Basis")))
+        quantity     = fmt_qty(parse_float(row.get("quantity")) or 0.0)
+        last_price   = fmt_money(parse_float(row.get("last price")) or 0.0)
+        last_chg     = fmt_money(parse_float(row.get("last price change")) or 0.0)
+        cur_value    = fmt_money(parse_float(row.get("current value")) or 0.0)
+        cost_basis   = fmt_money(parse_float(row.get("cost basis total")))
+        avg_cb       = fmt_money(parse_float(row.get("average cost basis")))
 
         # Bug 5/9: skip money-market rows with no real value
         if mm and cur_value == 0.0 and not cost_basis:
